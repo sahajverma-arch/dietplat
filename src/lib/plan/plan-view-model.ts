@@ -1,0 +1,309 @@
+/**
+ * Shared data + derivation layer for the plan page and the PDF export — both
+ * render the SAME PlanViewModel so the two can never drift. Every number
+ * here is either read straight from the persisted plan (already validated
+ * at generation time — see quantity.ts) or recomputed from exchange counts
+ * x Table 4.1; nothing is re-derived from the LLM or from food rows.
+ *
+ * Layout target: the real Deepak Sharma week-1 PDF (see CLAUDE.md "The
+ * exchange system" for how that PDF grounds the whole exchange system).
+ *
+ * The pure display types and the dynamic guidelines/narrative generation
+ * live in plan-guidelines.ts, which has no "@/db" import and is unit
+ * tested directly; this file is the DB-touching orchestrator around it.
+ */
+
+import { asc, eq, inArray } from "drizzle-orm"
+
+import { db } from "@/db"
+import { clients, dietPlanDays, dietPlanItems, dietPlanMeals, dietPlans, foods, profiles, roadmaps } from "@/db/schema"
+import type { Category, Macros, RoadmapFlag } from "@/lib/counselling/types"
+import type { ProteinRampRow } from "@/lib/counselling/protein-ramp"
+import type { RoadmapResult } from "@/lib/counselling/roadmap"
+import {
+  buildGuidelines,
+  CATEGORY_LABEL,
+  dateLabel,
+  dateRangeLabel,
+  SLOT_LABEL,
+  SLOT_TIME,
+  slugify,
+  type GuidelineBullet,
+  type PlanViewDay,
+  type PlanViewItem,
+  type PlanViewMeal,
+  type WeeklySummaryRow,
+} from "./plan-guidelines"
+import { TABLE_4_1, ZERO_COUNTS, type ExchangeCode, type ExchangeCounts } from "./table-4-1"
+
+export { CATEGORY_LABEL } from "./plan-guidelines"
+export type { GuidelineBullet, PlanViewDay, PlanViewItem, PlanViewMeal, WeeklySummaryRow } from "./plan-guidelines"
+
+export interface PlanViewModel {
+  plan: {
+    id: string
+    weekNumber: number
+    weekStart: string
+    weekEnd: string
+    status: "draft" | "approved"
+    generationMode: "ai" | "fallback"
+    modelUsed: string | null
+    region: string
+    dietType: string
+    preparedByName: string | null
+  }
+  client: { id: string; name: string; slug: string }
+  roadmap: {
+    id: string
+    category: Category
+    categoryLabel: string
+    bmiValue: number
+    classification: string
+    weightKg: number
+    heightCm: number
+    tdee: number
+    toLoseKg: number
+    fastestWeeks: number
+    slowestWeeks: number
+    flags: RoadmapFlag[]
+    proteinRamp: ProteinRampRow[]
+  }
+  targets: Macros
+  deviationPct: { kcal: number; proteinG: number; fatG: number; carbsG: number }
+  days: PlanViewDay[]
+  weeklySummary: WeeklySummaryRow[]
+  weeklyAvg: WeeklySummaryRow
+  exchangeCounts: ExchangeCounts
+  guidelines: GuidelineBullet[]
+  foodsToAvoid: string[]
+  narrative: string
+}
+
+export class PlanNotFoundError extends Error {
+  constructor(id: string) {
+    super(`Diet plan ${id} not found.`)
+    this.name = "PlanNotFoundError"
+  }
+}
+
+export async function loadPlanViewModel(planId: string): Promise<PlanViewModel> {
+  const [planRow] = await db
+    .select({ plan: dietPlans, client: clients, roadmap: roadmaps })
+    .from(dietPlans)
+    .innerJoin(clients, eq(dietPlans.clientId, clients.id))
+    .innerJoin(roadmaps, eq(dietPlans.roadmapId, roadmaps.id))
+    .where(eq(dietPlans.id, planId))
+    .limit(1)
+  if (!planRow) throw new PlanNotFoundError(planId)
+  const { plan, client, roadmap } = planRow
+
+  const preparedByRows = plan.preparedBy
+    ? await db.select().from(profiles).where(eq(profiles.id, plan.preparedBy)).limit(1)
+    : []
+  const preparedByName = preparedByRows[0]?.fullName ?? preparedByRows[0]?.email?.split("@")[0] ?? null
+
+  const dayRows = await db
+    .select()
+    .from(dietPlanDays)
+    .where(eq(dietPlanDays.dietPlanId, planId))
+    .orderBy(asc(dietPlanDays.dayIndex))
+
+  const mealRows = dayRows.length
+    ? await db
+        .select()
+        .from(dietPlanMeals)
+        .where(
+          inArray(
+            dietPlanMeals.dietPlanDayId,
+            dayRows.map((d) => d.id)
+          )
+        )
+        .orderBy(asc(dietPlanMeals.slotOrder))
+    : []
+
+  const itemRows = mealRows.length
+    ? await db
+        .select({ item: dietPlanItems, food: foods })
+        .from(dietPlanItems)
+        .innerJoin(foods, eq(dietPlanItems.foodId, foods.id))
+        .where(
+          inArray(
+            dietPlanItems.dietPlanMealId,
+            mealRows.map((m) => m.id)
+          )
+        )
+    : []
+
+  const itemsByMealId = new Map<string, PlanViewItem[]>()
+  for (const { item, food } of itemRows) {
+    const exchangeType = item.exchangeType as ExchangeCode
+    const macros = TABLE_4_1[exchangeType]
+    const list = itemsByMealId.get(item.dietPlanMealId) ?? []
+    list.push({
+      id: item.id,
+      foodId: item.foodId,
+      nameEn: food.nameEn,
+      householdMeasure: food.householdMeasure,
+      servingRawG: item.servingRawG,
+      exchangeType,
+      exchangeCount: item.exchangeCount,
+      kcal: macros.kcal * item.exchangeCount,
+      proteinG: macros.proteinG * item.exchangeCount,
+      carbsG: macros.carbsG * item.exchangeCount,
+      fatG: macros.fatG * item.exchangeCount,
+    })
+    itemsByMealId.set(item.dietPlanMealId, list)
+  }
+
+  const mealsByDayId = new Map<string, PlanViewMeal[]>()
+  for (const meal of mealRows) {
+    const items = itemsByMealId.get(meal.id) ?? []
+    const totals = items.reduce(
+      (acc, i) => ({
+        kcal: acc.kcal + i.kcal,
+        proteinG: acc.proteinG + i.proteinG,
+        carbsG: acc.carbsG + i.carbsG,
+        fatG: acc.fatG + i.fatG,
+      }),
+      { kcal: 0, proteinG: 0, carbsG: 0, fatG: 0 }
+    )
+    const list = mealsByDayId.get(meal.dietPlanDayId) ?? []
+    list.push({
+      slot: meal.slot,
+      slotLabel: SLOT_LABEL[meal.slot] ?? meal.slot,
+      timeLabel: SLOT_TIME[meal.slot] ?? "",
+      items,
+      totals,
+      calPercent: 0, // filled in once the day total is known
+    })
+    mealsByDayId.set(meal.dietPlanDayId, list)
+  }
+
+  const days: PlanViewDay[] = dayRows.map((day) => {
+    const meals = mealsByDayId.get(day.id) ?? []
+    const dayTotals = meals.reduce(
+      (acc, m) => ({
+        kcal: acc.kcal + m.totals.kcal,
+        proteinG: acc.proteinG + m.totals.proteinG,
+        carbsG: acc.carbsG + m.totals.carbsG,
+        fatG: acc.fatG + m.totals.fatG,
+      }),
+      { kcal: 0, proteinG: 0, carbsG: 0, fatG: 0 }
+    )
+    const mealsWithPct = meals.map((m) => ({
+      ...m,
+      calPercent: dayTotals.kcal > 0 ? (m.totals.kcal / dayTotals.kcal) * 100 : 0,
+    }))
+    return {
+      dayIndex: day.dayIndex,
+      date: day.date,
+      dateLabel: dateLabel(day.date),
+      meals: mealsWithPct,
+      totals: dayTotals,
+    }
+  })
+
+  const weeklySummary: WeeklySummaryRow[] = days.map((d) => ({
+    label: d.dateLabel,
+    kcal: d.totals.kcal,
+    proteinG: d.totals.proteinG,
+    carbsG: d.totals.carbsG,
+    fatG: d.totals.fatG,
+    proteinPct: d.totals.kcal > 0 ? ((d.totals.proteinG * 4) / d.totals.kcal) * 100 : 0,
+    carbsPct: d.totals.kcal > 0 ? ((d.totals.carbsG * 4) / d.totals.kcal) * 100 : 0,
+    fatPct: d.totals.kcal > 0 ? ((d.totals.fatG * 9) / d.totals.kcal) * 100 : 0,
+  }))
+
+  const weeklyAvg: WeeklySummaryRow = weeklySummary.length
+    ? {
+        label: "Weekly Avg",
+        kcal: avg(weeklySummary.map((r) => r.kcal)),
+        proteinG: avg(weeklySummary.map((r) => r.proteinG)),
+        carbsG: avg(weeklySummary.map((r) => r.carbsG)),
+        fatG: avg(weeklySummary.map((r) => r.fatG)),
+        proteinPct: avg(weeklySummary.map((r) => r.proteinPct)),
+        carbsPct: avg(weeklySummary.map((r) => r.carbsPct)),
+        fatPct: avg(weeklySummary.map((r) => r.fatPct)),
+      }
+    : { label: "Weekly Avg", kcal: 0, proteinG: 0, carbsG: 0, fatG: 0, proteinPct: 0, carbsPct: 0, fatPct: 0 }
+
+  const exchangeCounts: ExchangeCounts = { ...ZERO_COUNTS }
+  for (const meal of days[0]?.meals ?? []) {
+    for (const item of meal.items) {
+      exchangeCounts[item.exchangeType] += item.exchangeCount
+    }
+  }
+
+  const targets = plan.targets as Macros
+  const deviationRaw = (plan.deviation as Array<{ kcal: number; proteinG: number; fatG: number; carbsG: number }>)[0] ?? {
+    kcal: 0,
+    proteinG: 0,
+    fatG: 0,
+    carbsG: 0,
+  }
+  const deviationPct = {
+    kcal: deviationRaw.kcal * 100,
+    proteinG: deviationRaw.proteinG * 100,
+    fatG: deviationRaw.fatG * 100,
+    carbsG: deviationRaw.carbsG * 100,
+  }
+
+  const roadmapOutput = roadmap.output as RoadmapResult
+  const allFoods = await db.select().from(foods)
+
+  const { guidelines, foodsToAvoid, narrative } = buildGuidelines({
+    plan,
+    days,
+    exchangeCounts,
+    roadmapOutput,
+    allFoods,
+  })
+
+  return {
+    plan: {
+      id: plan.id,
+      weekNumber: plan.weekNumber,
+      weekStart: plan.weekStart,
+      weekEnd: plan.weekEnd,
+      status: plan.status,
+      generationMode: plan.generationMode,
+      modelUsed: plan.modelUsed,
+      region: plan.region,
+      dietType: plan.dietType,
+      preparedByName,
+    },
+    client: { id: client.id, name: client.name, slug: slugify(client.name) },
+    roadmap: {
+      id: roadmap.id,
+      category: roadmapOutput.category,
+      categoryLabel: CATEGORY_LABEL[roadmapOutput.category] ?? roadmapOutput.category,
+      bmiValue: roadmapOutput.anthro.bmiValue,
+      classification: roadmapOutput.anthro.classification,
+      weightKg: roadmapOutput.projection.weightKg,
+      heightCm: 0, // filled by caller if needed — not on RoadmapResult directly
+      tdee: roadmapOutput.energy.tdee,
+      toLoseKg: roadmapOutput.anthro.toLoseKg,
+      fastestWeeks: roadmapOutput.anthro.fastestWeeks,
+      slowestWeeks: roadmapOutput.anthro.slowestWeeks,
+      flags: roadmapOutput.flags,
+      proteinRamp: roadmapOutput.proteinRamp,
+    },
+    targets,
+    deviationPct,
+    days,
+    weeklySummary,
+    weeklyAvg,
+    exchangeCounts,
+    guidelines,
+    foodsToAvoid,
+    narrative,
+  }
+}
+
+function avg(values: number[]): number {
+  return values.length ? values.reduce((a, b) => a + b, 0) / values.length : 0
+}
+
+export function planDateRangeLabel(plan: PlanViewModel["plan"]): string {
+  return dateRangeLabel(plan.weekStart, plan.weekEnd)
+}

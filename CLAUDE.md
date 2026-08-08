@@ -21,6 +21,40 @@ The LLM does exactly one job: **given a list of exchange slots and a filtered li
 
 If you ever find yourself writing a prompt that asks a model to "calculate calories", "estimate macros", or "make sure it adds up to 1775 kcal" — stop. That is the bug this architecture exists to prevent.
 
+## The exchange system
+
+`exchange_types` (11 rows, read-only at runtime) is the classic textbook Table 4.1 — the
+Comprehensive Food Exchange List (Indian modified American exchange list):
+
+`milk_cow · milk_skim · meat · meat_lean · pulse · cereal · vegetable_a · vegetable_b · fruit ·
+fat · sugar`
+
+This was briefly swapped for the sister `dietitian-platform` codebase's richer 12-group exchange
+list during Prompt 3, on the theory that its "production-validated" data was more authoritative.
+That was wrong — verified by reading three real generated diet plans (Deepak Sharma, Anjali Joshi,
+Ritu Verma). Deepak's and Anjali's plans both explicitly cite "Table 4.1" and their arithmetic
+proves it: `Roti (atta 100 g raw, 5 rotis)` = 5 cereal exchanges at 20 g each (not the 12-group
+system's 30 g/roti), `Milk (250 ml)` = 1 exact milk_cow exchange, and the guidelines list swap
+groups as "Vegetable A (100 g)" / "Vegetable B (50 g)" — a split the 12-group system doesn't have
+at all. Ritu Verma's plan is a different, superseded architecture entirely (INDB/USDA
+portion-matched, not exchange-solved — the sister codebase's own
+`0017_remove_indb_usda_foods.sql` deleted that pipeline). Reverted to Table 4.1 for good.
+
+Each exchange type carries protein_g/carbs_g/fat_g/fiber_g per 1 exchange; kcal is always
+*computed* as `protein_g*4 + carbs_g*4 + fat_g*9`, never stored/sourced independently, so it can
+never drift from the macros it summarises (this generated-kcal figure sits a few kcal off Table
+4.1's own printed values in a couple of rows — e.g. fruit computes to 40 kcal against the table's
+45 — an artifact of the textbook's own rounding, not a bug). Two Vegetable A exchanges = one
+Vegetable B exchange. Eggs and lean meat/fish map onto the `meat` (1 whole egg = 1 exchange, 40 g)
+and `meat_lean` (35 g chicken/fish = 1 exchange) types respectively — confirmed against Deepak's
+plan's own non-veg swap line ("1 whole egg or 35 g chicken breast / fish").
+
+Food *display names* vary by region even when the underlying exchange is identical — Anjali's
+Maharashtrian plan calls the same wheat-flour cereal exchange "Poli" instead of "Roti", ghee is
+"Toop", peanuts are "Shengdana", dal is "Varan/Amti/Usal" depending on prep, sabzi is "Bhaji". The
+`foods` table carries region-specific alias rows for these (same exchange arithmetic, different
+`name_en`) rather than a separate name-translation layer.
+
 ## Rounding & precision
 - All intermediate maths unrounded. Round only at display.
 - kcal, protein/carb/fat grams → integer at display.
@@ -38,12 +72,12 @@ Every function in `src/lib/counselling/` and `src/lib/plan/` gets a Vitest unit 
 - Migrations in `supabase/migrations/`, timestamped, forward-only.
 
 ## Auth
-Google OAuth via Supabase. Access restricted to `@fitelo.com`. Enforced in three places — all three required:
-1. `queryParams: { hd: 'fitelo.com' }` on sign-in (UX hint only, spoofable).
-2. Postgres trigger on `auth.users` insert — reject non-fitelo.com emails.
-3. Middleware + RLS policy checking `auth.jwt() ->> 'email' LIKE '%@fitelo.com'`.
+Google OAuth via Supabase. Access restricted to `@fitelo.co`. Enforced in three places — all three required:
+1. `queryParams: { hd: 'fitelo.co' }` on sign-in (UX hint only, spoofable).
+2. Postgres trigger on `auth.users` insert — reject non-fitelo.co emails.
+3. Middleware + RLS policy checking `auth.jwt() ->> 'email' LIKE '%@fitelo.co'`.
 
 ## Do not
-- Do not install a nutrition API or food database package. Table 4.1 + our own `foods` table is the entire source of truth.
+- Do not install a nutrition API or food database package. `exchange_types` + our own `foods` table is the entire source of truth.
 - Do not let plan generation write to the DB until validation passes.
 - Do not add a "regenerate with AI" button that bypasses the solver.
