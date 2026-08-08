@@ -6,35 +6,33 @@ import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
 import { recomputeRoadmap } from "@/app/(app)/sessions/[sessionId]/review/actions"
+import { REGION_LABELS } from "@/lib/foods/vocab"
 
-// Only regions with seeded meal_templates + foods — see CLAUDE.md "The
-// exchange system" and README "How to add a region". Keep in sync with
-// supabase/migrations/20260808200000_classic_table41_exchange_system.sql,
-// 20260809200000_south_indian_region.sql and 20260809300000_five_more_regions.sql.
-const SEEDED_REGIONS = [
-  { value: "north_indian", label: "North Indian" },
-  { value: "maharashtrian", label: "Maharashtrian" },
-  { value: "south_indian", label: "South Indian (Malayali)" },
-  { value: "punjabi", label: "Punjabi" },
-  { value: "gujarati", label: "Gujarati" },
-  { value: "bengali", label: "Bengali" },
-  { value: "rajasthani", label: "Rajasthani" },
-  { value: "hyderabadi", label: "Hyderabadi" },
-]
+function regionLabel(region: string): string {
+  return REGION_LABELS[region as keyof typeof REGION_LABELS] ?? region.replace(/_/g, " ")
+}
 
 export function ActionsBar({
   sessionId,
   roadmapId,
   hasUnresolvedBlock,
+  availableRegions,
+  suggestedRegion,
 }: {
   sessionId: string
   roadmapId: string
   hasUnresolvedBlock: boolean
+  /** Regions with real meal_templates rows — the only ones generation can succeed for. Computed from the DB, not hardcoded. */
+  availableRegions: string[]
+  /** Best-effort match from the client's counselling cuisine answer (q34) — a starting point the dietitian can override, never a hard requirement. */
+  suggestedRegion?: string
 }) {
   const router = useRouter()
   const [isPending, startTransition] = useTransition()
   const [isGenerating, setIsGenerating] = useState(false)
-  const [region, setRegion] = useState(SEEDED_REGIONS[0].value)
+  const initialRegion = suggestedRegion && availableRegions.includes(suggestedRegion) ? suggestedRegion : availableRegions[0]
+  const [region, setRegion] = useState(initialRegion)
+  const isUsingSuggestion = suggestedRegion !== undefined && region === suggestedRegion
 
   function handleRecompute() {
     startTransition(async () => {
@@ -78,18 +76,23 @@ export function ActionsBar({
 
   return (
     <div className="flex flex-wrap items-center gap-3 border-t pt-4 print:hidden">
-      <select
-        value={region}
-        onChange={(e) => setRegion(e.target.value)}
-        disabled={hasUnresolvedBlock || isGenerating}
-        className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-      >
-        {SEEDED_REGIONS.map((r) => (
-          <option key={r.value} value={r.value}>
-            {r.label}
-          </option>
-        ))}
-      </select>
+      <div className="flex flex-col gap-1">
+        <select
+          value={region}
+          onChange={(e) => setRegion(e.target.value)}
+          disabled={hasUnresolvedBlock || isGenerating}
+          className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+        >
+          {availableRegions.map((r) => (
+            <option key={r} value={r}>
+              {regionLabel(r)}
+            </option>
+          ))}
+        </select>
+        {isUsingSuggestion && (
+          <span className="text-xs text-muted-foreground">From counselling cuisine answer</span>
+        )}
+      </div>
       <Button onClick={handleGenerate} disabled={hasUnresolvedBlock || isGenerating}>
         {isGenerating ? "Generating…" : "Generate week 1 plan"}
       </Button>

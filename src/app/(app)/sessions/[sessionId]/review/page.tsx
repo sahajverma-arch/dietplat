@@ -3,7 +3,8 @@ import { notFound } from "next/navigation"
 import Link from "next/link"
 
 import { db } from "@/db"
-import { clients, counsellingSessions, roadmapOverrides, roadmaps } from "@/db/schema"
+import { clients, counsellingSessions, mealTemplates, roadmapOverrides, roadmaps } from "@/db/schema"
+import { regionFromAnswers } from "@/lib/plan/client-profile-from-answers"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent } from "@/components/ui/card"
 import { CalcCard } from "@/components/review/calc-card"
@@ -69,6 +70,20 @@ export default async function ReviewPage({
     .from(roadmapOverrides)
     .where(eq(roadmapOverrides.roadmapId, roadmapRow.id))
   const overriddenCodes = new Set(overrides.map((o) => o.flagCode))
+
+  // Which regions can actually be generated for is a runtime DB fact (which
+  // meal_templates rows exist), not a hardcoded list — so this can never
+  // drift out of sync with what's actually been seeded (see the actions-bar
+  // region dropdown, which used to hardcode this and silently miss regions
+  // added after it was last edited).
+  const availableRegionRows = await db.selectDistinct({ region: mealTemplates.region }).from(mealTemplates)
+  // north_indian first (the common default when there's no counselling
+  // signal to suggest otherwise), then alphabetical — not just whatever
+  // order Postgres happens to return.
+  const availableRegions = availableRegionRows
+    .map((r) => r.region)
+    .sort((a, b) => (a === "north_indian" ? -1 : b === "north_indian" ? 1 : a.localeCompare(b)))
+  const suggestedRegion = regionFromAnswers(answers)
 
   const blockFlags = output.flags.filter((f) => f.level === "block" || f.level === "stop")
   const hasUnresolvedBlock = blockFlags.some((f) => !overriddenCodes.has(f.code))
@@ -314,7 +329,13 @@ export default async function ReviewPage({
       </section>
 
       {/* 9. Actions */}
-      <ActionsBar sessionId={sessionId} roadmapId={roadmapRow.id} hasUnresolvedBlock={hasUnresolvedBlock} />
+      <ActionsBar
+        sessionId={sessionId}
+        roadmapId={roadmapRow.id}
+        hasUnresolvedBlock={hasUnresolvedBlock}
+        availableRegions={availableRegions}
+        suggestedRegion={suggestedRegion}
+      />
     </div>
   )
 }

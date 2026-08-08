@@ -8,6 +8,7 @@
  */
 
 import type { Answers } from "@/lib/counselling/questions"
+import type { REGIONS } from "@/lib/foods/vocab"
 import type { DietType } from "./exchange-solver"
 
 export class ClientProfileError extends Error {
@@ -112,4 +113,44 @@ export function clientDislikesFromAnswers(answers: Answers): string[] {
     .split(/[,\n;]/)
     .map((s) => s.trim())
     .filter((s) => s.length > 0)
+}
+
+// q34 option label -> our seeded region slug. Only the labels with a
+// confident, verified fit are listed — the source PDF's cuisine list (q34)
+// is far wider than the 8 regions we have real meal_templates/foods for
+// (Tamil, Karnataka, Kashmiri, Middle Eastern, ...). Guessing a fit for
+// those would put a client's plan in front of food their household doesn't
+// actually cook, which is worse than asking the dietitian to pick. "Kerala-
+// style" -> south_indian follows the same call already made for Priya's
+// Malayali plan (see CLAUDE.md "The exchange system") — the seeded
+// south_indian foods (idli, dosa, sambar, puttu, appam...) are Kerala-
+// leaning, not generic pan-South-Indian, so Tamil/Karnataka/Telugu are left
+// unmapped rather than assumed close enough.
+const REGION_BY_CUISINE_ANSWER: Partial<Record<string, (typeof REGIONS)[number]>> = {
+  "North Indian": "north_indian",
+  Punjabi: "punjabi",
+  Gujarati: "gujarati",
+  Rajasthani: "rajasthani",
+  Maharashtrian: "maharashtrian",
+  Bengali: "bengali",
+  "South Indian": "south_indian",
+  "Kerala-style": "south_indian",
+}
+
+/**
+ * Best-effort suggestion, not a hard mapping: q34 allows up to 3 cuisines
+ * and most of its option list has no seeded region at all. Returns the
+ * first selection (in the order the client/dietitian picked them) with a
+ * confident mapping, or undefined if none match — callers must fall back to
+ * a manual choice, never silently assume a region.
+ */
+export function regionFromAnswers(answers: Answers): (typeof REGIONS)[number] | undefined {
+  const selections = answers.q34
+  if (!Array.isArray(selections)) return undefined
+  for (const label of selections) {
+    if (typeof label !== "string") continue
+    const mapped = REGION_BY_CUISINE_ANSWER[label]
+    if (mapped) return mapped
+  }
+  return undefined
 }
