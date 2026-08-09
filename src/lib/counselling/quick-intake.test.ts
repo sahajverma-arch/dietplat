@@ -10,9 +10,9 @@ import {
 } from "./quick-intake"
 
 describe("quick intake", () => {
-  it("asks exactly 30 questions across 8 groups", () => {
-    expect(QUICK_GROUPS.length).toBe(8)
-    expect(QUICK_ASKED_IDS.size).toBe(30)
+  it("asks exactly 33 questions across 9 groups (30 from the PDF + 3 current-intake questions added beyond it)", () => {
+    expect(QUICK_GROUPS.length).toBe(9)
+    expect(QUICK_ASKED_IDS.size).toBe(33)
   })
 
   it("auto-fills exactly the 41 required-but-unasked full-form questions listed in the PDF", () => {

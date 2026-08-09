@@ -1,7 +1,16 @@
 /**
- * Quick Counselling — a curated 30-question subset of the shared 332-question
- * bank (questions.ts), not a separate bank. Source: the client's exported
+ * Quick Counselling — a curated subset of the shared 332-question bank
+ * (questions.ts), not a separate bank. Source: the client's exported
  * quick-counselling-questions.pdf, "8 groups · 30 questions asked".
+ *
+ * Deliberate addition beyond the PDF: the "current_intake" group (3
+ * questions, reusing q29b_est_protein_g/carbs_g/fat_g from the full-form
+ * bank) isn't in the PDF's 30. Without it, roadmapInputFromAnswers() had no
+ * currentIntake to build for any quick-counselled client, silently
+ * disabling the protein ramp and multi-week calorie projection for them —
+ * the same gap already fixed for the full form (see questions.ts's own
+ * "Deliberate addition" comment). kcal isn't asked here; it's derived from
+ * the three macros (see roadmap-input.ts's currentIntakeFromAnswers).
  */
 
 import { type Answers, findQuestion, isQuestionRequired, isQuestionVisible, QUESTIONS } from "./questions"
@@ -59,6 +68,13 @@ export const QUICK_GROUPS: QuickGroup[] = [
     id: "medical",
     title: "Medical",
     questionIds: ["q17", "q19", "q19a"],
+  },
+  {
+    id: "current_intake",
+    title: "Current intake",
+    questionIds: ["q29b_est_protein_g", "q29b_est_carbs_g", "q29b_est_fat_g"],
+    intro:
+      "Not in the original quick-counselling PDF — added so quick sessions get a protein ramp and multi-week calorie projection too, same as the full form. Estimated calories are computed from these three (protein×4 + carbs×4 + fat×9), not asked separately. Leave all three blank if you can't estimate — the roadmap runs without the ramp, exactly as before.",
   },
 ]
 

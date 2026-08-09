@@ -83,34 +83,45 @@ function trainingDaysPerWeek(answers: Answers): number {
 
 /**
  * currentIntake (q29b_est_kcal/protein_g/carbs_g/fat_g — see questions.ts's
- * top comment) only activates once the dietitian has entered ALL FOUR
- * numbers; a partial fill is treated the same as none, exactly like an
- * entirely-unanswered set. This is optional supplementary data, not a
+ * top comment) only activates once protein, carbs and fat are ALL entered;
+ * a partial fill of those three is treated the same as none, exactly like
+ * an entirely-unanswered set. This is optional supplementary data, not a
  * required clinical gate — nothing throws, the roadmap just runs without
  * the current-intake-aware branches (already-below-target, chronic-under-
  * eating flag, protein ramp) the same way it always has when this wasn't
  * captured at all. What was/wasn't filled in is still visible on the
  * review page's raw answers, so nothing is hidden — it just doesn't feed
  * the engine half-complete.
+ *
+ * kcal itself is optional even when the other three are present: if
+ * q29b_est_kcal was reported (full form), it's used as-is — a client's
+ * self-reported daily-calorie estimate isn't required to exactly equal
+ * protein×4 + carbs×4 + fat×9 (rounding, app-reported totals, etc., same
+ * as any self-reported figure). If it wasn't asked at all (quick form only
+ * asks protein/carbs/fat — see quick-intake.ts), kcal is computed from the
+ * three macros via the same Atwater conversion CLAUDE.md already uses for
+ * every food's exchange kcal ("THE ONE RULE THAT MATTERS" section), rather
+ * than blocking the protein ramp on a fourth number the quick form was
+ * deliberately built to avoid asking.
  */
 function currentIntakeFromAnswers(answers: Answers): CurrentIntake | undefined {
-  const kcal = answers.q29b_est_kcal
   const proteinG = answers.q29b_est_protein_g
   const carbsG = answers.q29b_est_carbs_g
   const fatG = answers.q29b_est_fat_g
 
   if (
-    typeof kcal !== "number" ||
     typeof proteinG !== "number" ||
     typeof carbsG !== "number" ||
     typeof fatG !== "number" ||
-    !Number.isFinite(kcal) ||
     !Number.isFinite(proteinG) ||
     !Number.isFinite(carbsG) ||
     !Number.isFinite(fatG)
   ) {
     return undefined
   }
+
+  const reportedKcal = answers.q29b_est_kcal
+  const kcal = typeof reportedKcal === "number" && Number.isFinite(reportedKcal) ? reportedKcal : proteinG * 4 + carbsG * 4 + fatG * 9
 
   return { kcal, proteinG, carbsG, fatG }
 }
