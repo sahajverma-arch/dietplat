@@ -1,0 +1,32 @@
+-- LEANR: retire "Paneer Paratha" (added in
+-- 20260810900000_breakfast_evening_archetypes.sql) — a real correctness
+-- bug, not a display issue. It was classified exchange_type = 'cereal',
+-- same bucket as Aloo/Gobi/Methi/Mooli Paratha — but Table 4.1 macros are
+-- a pure function of exchange_type (protein_g etc. never vary by food,
+-- see table-4-1.ts / CLAUDE.md "THE ONE RULE THAT MATTERS"), so it could
+-- never actually carry more protein than a vegetable-stuffed paratha
+-- despite paneer being a real, clinically non-negligible protein+fat
+-- source (~18g protein/100g) unlike a vegetable filling.
+--
+-- The only exchange type with meaningfully higher protein is 'meat' (7g
+-- vs cereal's 2g per exchange, see table-4-1.ts) — but exchange-
+-- solver.ts's anchorVariants() hard-codes meat = 0 for EVERY vegetarian
+-- and jain plan (never even attempted, not just usually zero). Paneer is
+-- specifically the vegetarian protein option, so re-tagging it as 'meat'
+-- would make it unreachable for exactly the clients who'd want it.
+--
+-- There is no honest way to give this food accurate elevated protein in
+-- the current exchange system. Deactivating (not deleting — foods.is_active
+-- / meal_archetypes.is_active are the established retirement mechanism
+-- throughout this schema, and diet_plan_meals.archetype_id is nullable
+-- with ON DELETE SET NULL specifically so retiring an archetype can't
+-- corrupt already-generated plan history) rather than leaving a food that
+-- implies a protein content it structurally cannot deliver.
+--
+-- Aloo/Gobi/Methi/Mooli Paratha are NOT affected — vegetable stuffings are
+-- genuinely macro-negligible at typical stuffing quantities, matching
+-- standard clinical exchange-list practice (only protein/fat-dense
+-- fillings like paneer get flagged for a separate exchange).
+
+update public.foods set is_active = false where name_en = 'Paneer Paratha';
+update public.meal_archetypes set is_active = false where code = 'punjabi_paneer_paratha_meal';
