@@ -9,7 +9,9 @@
 import { Document, Page, Path, StyleSheet, Svg, Text, View } from "@react-pdf/renderer"
 
 import { formatBmi, formatGrams, formatKcal, formatWeight } from "@/lib/format"
-import { formatItemLabel } from "@/lib/plan/format-item"
+import { combineDishGroups } from "@/lib/plan/dish-combination"
+import { composeMealDisplay, formatComposedGroupPlainText } from "@/lib/plan/meal-composition"
+import { applyVegetableDishNames } from "@/lib/plan/vegetable-dish-naming"
 import type { PlanViewModel } from "@/lib/plan/plan-view-model"
 import { planDateRangeLabel } from "@/lib/plan/plan-view-model"
 
@@ -183,7 +185,22 @@ export function PlanPdfDocument({ model }: { model: PlanViewModel }) {
                 <View key={meal.slot} style={styles.tRow}>
                   <Text style={styles.cellTime}>{meal.timeLabel}</Text>
                   <Text style={styles.cellMeal}>{meal.slotLabel}</Text>
-                  <Text style={styles.cellFoods}>{meal.items.map(formatItemLabel).join(", ")}</Text>
+                  <Text style={styles.cellFoods}>
+                    {applyVegetableDishNames(
+                      combineDishGroups(
+                        composeMealDisplay(meal.items, model.plan.region),
+                        meal.archetypeName,
+                        meal.archetypeDishFamilyIdsByExchangeType,
+                        model.dishCombinations,
+                        model.plan.region
+                      ),
+                      model.vegetableDishCombinations,
+                      model.vegetableDishCombinationMembers,
+                      model.plan.region
+                    )
+                      .map(formatComposedGroupPlainText)
+                      .join(", ")}
+                  </Text>
                   <Text style={styles.cellNum}>{formatKcal(meal.totals.kcal)}</Text>
                   <Text style={styles.cellNum}>{formatGrams(meal.totals.proteinG)}g</Text>
                   <Text style={styles.cellNum}>{formatGrams(meal.totals.carbsG)}g</Text>

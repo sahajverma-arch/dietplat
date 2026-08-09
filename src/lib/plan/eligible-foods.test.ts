@@ -129,4 +129,59 @@ describe("eligibleFoodsForSkeleton", () => {
       expect((err as NoEligibleFoodsError).failedFilter).toBe("regions")
     }
   })
+
+  describe("regression — no dishFamilyConstraints argument", () => {
+    it("produces byte-identical output to omitting the 4th parameter entirely, for a region/slot with no archetype data", () => {
+      const idli = makeFood({ nameEn: "Idli", exchangeType: "cereal", mealSlots: ["breakfast"], dishFamilyId: "idli-family" })
+      const dosa = makeFood({ nameEn: "Dosa", exchangeType: "cereal", mealSlots: ["breakfast"], dishFamilyId: "dosa-family" })
+      const needed = new Map([["cereal" as const, new Set(["breakfast"])]])
+      const criteria = { region: "north_indian", dietType: "vegetarian", clientAllergens: [], clientDislikes: [] }
+
+      const withoutArg = eligibleFoodsForSkeleton([idli, dosa], criteria, needed)
+      const withEmptyConstraints = eligibleFoodsForSkeleton([idli, dosa], criteria, needed, {})
+      const withUndefinedConstraints = eligibleFoodsForSkeleton([idli, dosa], criteria, needed, undefined)
+
+      expect(withoutArg).toEqual(withEmptyConstraints)
+      expect(withoutArg).toEqual(withUndefinedConstraints)
+      expect(withoutArg.breakfast?.cereal).toHaveLength(2)
+    })
+  })
+
+  describe("dish-family (archetype) narrowing", () => {
+    const idli = makeFood({ id: "idli", nameEn: "Idli", exchangeType: "cereal", regions: ["south_indian"], mealSlots: ["breakfast"], dishFamilyId: "idli-family" })
+    const dosa = makeFood({ id: "dosa", nameEn: "Dosa", exchangeType: "cereal", regions: ["south_indian"], mealSlots: ["breakfast"], dishFamilyId: "dosa-family" })
+    const sambar = makeFood({ id: "sambar", nameEn: "Sambar", exchangeType: "pulse", regions: ["south_indian"], mealSlots: ["breakfast"], dishFamilyId: "sambar-family" })
+    const masoorDal = makeFood({ id: "masoor", nameEn: "Masoor Dal", exchangeType: "pulse", regions: ["south_indian"], mealSlots: ["breakfast"], dishFamilyId: "masoor-family" })
+    const needed = new Map([
+      ["cereal" as const, new Set(["breakfast"])],
+      ["pulse" as const, new Set(["breakfast"])],
+    ])
+    const criteria = { region: "south_indian", dietType: "vegetarian", clientAllergens: [], clientDislikes: [] }
+
+    it("restricts a bucket to only foods carrying one of the given dish_family ids — Idli-Sambar's pulse role excludes Masoor Dal", () => {
+      const result = eligibleFoodsForSkeleton([idli, dosa, sambar, masoorDal], criteria, needed, {
+        breakfast: { cereal: ["idli-family"], pulse: ["sambar-family"] },
+      })
+      expect(result.breakfast?.cereal?.map((f) => f.id)).toEqual(["idli"])
+      expect(result.breakfast?.pulse?.map((f) => f.id)).toEqual(["sambar"])
+      expect(result.breakfast?.pulse?.map((f) => f.id)).not.toContain("masoor")
+    })
+
+    it("gracefully falls back to the wider exchange-type pool when the family-narrowed pool is empty, instead of throwing", () => {
+      const result = eligibleFoodsForSkeleton([idli, dosa, sambar, masoorDal], criteria, needed, {
+        // No food in this fixture set carries "kadala-family" — the pulse
+        // component should degrade to the full (region/diet/slot-filtered)
+        // pulse pool rather than come back empty or throw.
+        breakfast: { cereal: ["idli-family"], pulse: ["kadala-family"] },
+      })
+      expect(result.breakfast?.pulse?.map((f) => f.id).sort()).toEqual(["masoor", "sambar"])
+    })
+
+    it("a bucket with no constraint entry for its exchangeType is unaffected even when other buckets in the same slot are constrained", () => {
+      const result = eligibleFoodsForSkeleton([idli, dosa, sambar, masoorDal], criteria, needed, {
+        breakfast: { cereal: ["idli-family"] }, // pulse intentionally omitted
+      })
+      expect(result.breakfast?.pulse?.map((f) => f.id).sort()).toEqual(["masoor", "sambar"])
+    })
+  })
 })

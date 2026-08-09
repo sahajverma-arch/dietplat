@@ -9,10 +9,11 @@
 
 import { NextResponse } from "next/server"
 import { z } from "zod"
-import { and, eq, inArray } from "drizzle-orm"
+import { and, eq, gte, inArray } from "drizzle-orm"
 
 import { db } from "@/db"
 import {
+  archetypeComponents,
   clients,
   counsellingSessions,
   dietPlanDays,
@@ -20,6 +21,7 @@ import {
   dietPlanMeals,
   dietPlans,
   foods,
+  mealArchetypes,
   mealTemplates,
   planGenerationRuns,
   roadmapOverrides,
@@ -28,6 +30,7 @@ import {
 import type { Answers } from "@/lib/counselling/questions"
 import { weekTargets, type RoadmapResult } from "@/lib/counselling/roadmap"
 import { requireStaffUser } from "@/lib/counselling/require-staff-user"
+import { env } from "@/lib/env"
 import { REGIONS } from "@/lib/foods/vocab"
 import {
   ClientProfileError,
@@ -35,11 +38,13 @@ import {
   clientDislikesFromAnswers,
   dietTypeFromAnswers,
 } from "@/lib/plan/client-profile-from-answers"
-import { NoEligibleFoodsError, eligibleFoodsForSkeleton } from "@/lib/plan/eligible-foods"
+import { selectArchetypesForWeek, type ArchetypeAssignment, type ArchetypeCandidate } from "@/lib/plan/archetype-selector"
+import { NoEligibleFoodsError, eligibleFoodsForSkeleton, type DishFamilyConstraintsBySlot } from "@/lib/plan/eligible-foods"
 import { solveExchanges } from "@/lib/plan/exchange-solver"
 import { distributeMeals, type MealSlotTemplate } from "@/lib/plan/meal-distributor"
 import { selectFoods, type AttemptLog } from "@/lib/plan/food-selector"
-import type { PreviousWeekItem } from "@/lib/plan/food-selector-types"
+import { checkArchetypeAdherence } from "@/lib/plan/food-selector-validate"
+import type { FoodSelectorInput, PreviousWeekItem } from "@/lib/plan/food-selector-types"
 import type { ExchangeCode } from "@/lib/plan/table-4-1"
 import {
   ExchangeTypeMismatchError,
@@ -77,11 +82,20 @@ function addDays(date: Date, days: number): Date {
  * so week N doesn't reuse week N-1's exact food set on day 0. Falls back to
  * a bare day-index offset (still avoids resetting the rotation to 0) if no
  * previous-week plan exists yet — e.g. week 3 generated before week 2.
+ *
+ * Also carries archetype continuity (Meal Archetype layer, additive): the
+ * archetype ids used on the previous week's final two days, by slot,
+ * mirroring the food-continuity role above — archetype-selector.ts's
+ * RECENT_DAYS_AVOIDED is 2, so that's how far back this looks.
  */
 async function loadPreviousWeekSeed(
   roadmapId: string,
   weekNumber: number
-): Promise<{ dayIndexOffset: number; previousWeekLastDay?: Record<string, PreviousWeekItem[]> }> {
+): Promise<{
+  dayIndexOffset: number
+  previousWeekLastDay?: Record<string, PreviousWeekItem[]>
+  recentArchetypeIdsBySlot?: Record<string, string[]>
+}> {
   if (weekNumber <= 1) return { dayIndexOffset: 0 }
   const dayIndexOffset = (weekNumber - 1) * 7
 
@@ -97,31 +111,58 @@ async function loadPreviousWeekSeed(
     .from(dietPlanDays)
     .where(and(eq(dietPlanDays.dietPlanId, previousPlan.id), eq(dietPlanDays.dayIndex, 6)))
     .limit(1)
-  if (!lastDay) return { dayIndexOffset }
 
-  const mealRows = await db.select().from(dietPlanMeals).where(eq(dietPlanMeals.dietPlanDayId, lastDay.id))
-  if (mealRows.length === 0) return { dayIndexOffset }
+  let previousWeekLastDay: Record<string, PreviousWeekItem[]> | undefined
+  if (lastDay) {
+    const mealRows = await db.select().from(dietPlanMeals).where(eq(dietPlanMeals.dietPlanDayId, lastDay.id))
+    if (mealRows.length > 0) {
+      const itemRows = await db
+        .select({ item: dietPlanItems, food: foods, slot: dietPlanMeals.slot })
+        .from(dietPlanItems)
+        .innerJoin(dietPlanMeals, eq(dietPlanItems.dietPlanMealId, dietPlanMeals.id))
+        .innerJoin(foods, eq(dietPlanItems.foodId, foods.id))
+        .where(
+          inArray(
+            dietPlanItems.dietPlanMealId,
+            mealRows.map((m) => m.id)
+          )
+        )
 
-  const itemRows = await db
-    .select({ item: dietPlanItems, food: foods, slot: dietPlanMeals.slot })
-    .from(dietPlanItems)
-    .innerJoin(dietPlanMeals, eq(dietPlanItems.dietPlanMealId, dietPlanMeals.id))
-    .innerJoin(foods, eq(dietPlanItems.foodId, foods.id))
-    .where(
-      inArray(
-        dietPlanItems.dietPlanMealId,
-        mealRows.map((m) => m.id)
-      )
-    )
-
-  const previousWeekLastDay: Record<string, PreviousWeekItem[]> = {}
-  for (const row of itemRows) {
-    const list = previousWeekLastDay[row.slot] ?? []
-    list.push({ exchangeType: row.item.exchangeType as ExchangeCode, foodId: row.item.foodId, nameEn: row.food.nameEn })
-    previousWeekLastDay[row.slot] = list
+      previousWeekLastDay = {}
+      for (const row of itemRows) {
+        const list = previousWeekLastDay[row.slot] ?? []
+        list.push({ exchangeType: row.item.exchangeType as ExchangeCode, foodId: row.item.foodId, nameEn: row.food.nameEn })
+        previousWeekLastDay[row.slot] = list
+      }
+    }
   }
 
-  return { dayIndexOffset, previousWeekLastDay }
+  const recentDays = await db
+    .select()
+    .from(dietPlanDays)
+    .where(and(eq(dietPlanDays.dietPlanId, previousPlan.id), gte(dietPlanDays.dayIndex, 5)))
+
+  let recentArchetypeIdsBySlot: Record<string, string[]> | undefined
+  if (recentDays.length > 0) {
+    const recentMeals = await db
+      .select()
+      .from(dietPlanMeals)
+      .where(
+        inArray(
+          dietPlanMeals.dietPlanDayId,
+          recentDays.map((d) => d.id)
+        )
+      )
+    recentArchetypeIdsBySlot = {}
+    for (const meal of recentMeals) {
+      if (!meal.archetypeId) continue
+      const list = recentArchetypeIdsBySlot[meal.slot] ?? []
+      list.push(meal.archetypeId)
+      recentArchetypeIdsBySlot[meal.slot] = list
+    }
+  }
+
+  return { dayIndexOffset, previousWeekLastDay, recentArchetypeIdsBySlot }
 }
 
 export async function POST(request: Request) {
@@ -245,6 +286,88 @@ export async function POST(request: Request) {
     }
   }
 
+  // Moved ahead of eligible-foods so the archetype layer below can use
+  // dayIndexOffset/recentArchetypeIdsBySlot — otherwise unchanged from
+  // before this layer existed, still a single self-contained read.
+  const { dayIndexOffset, previousWeekLastDay, recentArchetypeIdsBySlot } = await loadPreviousWeekSeed(
+    roadmapId,
+    weekNumber
+  )
+
+  // --- Meal Archetype layer (additive) -----------------------------------
+  // Sits between meal distribution and eligible-foods filtering, exactly
+  // as approved: never touches solverResult/skeleton (nutrition is already
+  // fully decided above this line), only narrows which foods are eligible
+  // to fill a slot the solver+distributor already solved. Querying
+  // archetype tables is skipped entirely when the kill switch is off — "no
+  // archetype behavior should execute" is true at the DB-access level, not
+  // just the output level.
+  const archetypeCandidatesBySlot: Record<string, ArchetypeCandidate[]> = {}
+  if (env.ARCHETYPE_SELECTION_ENABLED) {
+    const archetypeRows = await db
+      .select({
+        id: mealArchetypes.id,
+        code: mealArchetypes.code,
+        name: mealArchetypes.name,
+        slot: mealArchetypes.slot,
+        dietTypes: mealArchetypes.dietTypes,
+        authenticityScore: mealArchetypes.authenticityScore,
+        componentRole: archetypeComponents.componentRole,
+        dishFamilyIds: archetypeComponents.dishFamilyIds,
+        componentExchangeType: archetypeComponents.exchangeType,
+        isRequired: archetypeComponents.isRequired,
+      })
+      .from(mealArchetypes)
+      .innerJoin(archetypeComponents, eq(archetypeComponents.archetypeId, mealArchetypes.id))
+      .where(and(eq(mealArchetypes.region, region), eq(mealArchetypes.isActive, true)))
+
+    const archetypesById = new Map<string, ArchetypeCandidate>()
+    for (const row of archetypeRows) {
+      if (!row.dietTypes.includes(dietType)) continue
+      let candidate = archetypesById.get(row.id)
+      if (!candidate) {
+        candidate = { id: row.id, code: row.code, name: row.name, authenticityScore: row.authenticityScore, components: [] }
+        archetypesById.set(row.id, candidate)
+        ;(archetypeCandidatesBySlot[row.slot] ??= []).push(candidate)
+      }
+      candidate.components.push({
+        role: row.componentRole,
+        dishFamilyIds: row.dishFamilyIds,
+        exchangeType: row.componentExchangeType as ExchangeCode,
+        isRequired: row.isRequired,
+      })
+    }
+  }
+
+  const archetypeAssignmentsByDay: ArchetypeAssignment[][] = selectArchetypesForWeek({
+    slots: templates.map((t) => t.slot),
+    candidatesBySlot: archetypeCandidatesBySlot,
+    dayIndexOffset,
+    recentArchetypeIdsBySlot,
+    enabled: env.ARCHETYPE_SELECTION_ENABLED,
+  })
+
+  // Weekly union, per (slot, exchangeType), of every day's chosen
+  // archetype's acceptable dish families — narrows eligibility once for
+  // the whole week (matching how eligibleFoodsBySlot has always been
+  // day-invariant), then the existing, UNCHANGED rotation logic (LLM
+  // anti-repetition rules, fallback's stableHash rotation) picks day to
+  // day within that narrower, coherence-biased pool. Empty when no
+  // archetype applied anywhere, which produces byte-identical eligibility
+  // output to before this layer existed (see eligible-foods.ts).
+  const dishFamilyConstraints: DishFamilyConstraintsBySlot = {}
+  for (const dayAssignments of archetypeAssignmentsByDay) {
+    for (const assignment of dayAssignments) {
+      if (!assignment.archetypeId) continue
+      const bucket = (dishFamilyConstraints[assignment.slot] ??= {})
+      for (const component of assignment.components) {
+        const existing = bucket[component.exchangeType] ?? []
+        bucket[component.exchangeType] = [...new Set([...existing, ...component.dishFamilyIds])]
+      }
+    }
+  }
+  // -------------------------------------------------------------------------
+
   const allFoods = await db.select().from(foods)
 
   let eligibleFoodsBySlot
@@ -252,7 +375,8 @@ export async function POST(request: Request) {
     eligibleFoodsBySlot = eligibleFoodsForSkeleton(
       allFoods,
       { region, dietType, clientAllergens, clientDislikes },
-      neededSlotsByExchangeType
+      neededSlotsByExchangeType,
+      dishFamilyConstraints
     )
   } catch (err) {
     if (err instanceof NoEligibleFoodsError) {
@@ -264,12 +388,29 @@ export async function POST(request: Request) {
     throw err
   }
 
-  const { dayIndexOffset, previousWeekLastDay } = await loadPreviousWeekSeed(roadmapId, weekNumber)
+  const foodSelectorInput: FoodSelectorInput = {
+    region,
+    dietType,
+    mealCount,
+    skeleton,
+    eligibleFoodsBySlot,
+    dayIndexOffset,
+    previousWeekLastDay,
+    archetypeAssignmentsByDay,
+  }
 
   const attempts: AttemptLog[] = []
-  const selectionResult = await selectFoods(
-    { region, dietType, mealCount, skeleton, eligibleFoodsBySlot, dayIndexOffset, previousWeekLastDay },
-    { onAttempt: (log) => attempts.push(log) }
+  const selectionResult = await selectFoods(foodSelectorInput, { onAttempt: (log) => attempts.push(log) })
+
+  // Informational only (Meal Archetype layer) — never affects generation
+  // success/failure. Computed against whichever selection actually won
+  // (LLM or fallback), attached below to the LAST logged attempt purely
+  // for observability; nutrition validation (assertWithinTolerance,
+  // further down) is entirely separate and unaffected by this.
+  const archetypeAdherence = checkArchetypeAdherence(
+    selectionResult.selection,
+    archetypeAssignmentsByDay,
+    foodSelectorInput
   )
 
   // Persisted immediately — independent of whether the rest of generation
@@ -281,7 +422,7 @@ export async function POST(request: Request) {
     const inserted = await db
       .insert(planGenerationRuns)
       .values(
-        attempts.map((log) => ({
+        attempts.map((log, i) => ({
           clientId: client.id,
           roadmapId,
           weekNumber,
@@ -290,7 +431,10 @@ export async function POST(request: Request) {
           model: log.model,
           promptHash: log.promptHash,
           rawResponse: log.rawResponse,
-          validationResult: log.validationResult,
+          validationResult:
+            i === attempts.length - 1 && archetypeAdherence.length > 0
+              ? { ...log.validationResult, archetypeAdherence }
+              : log.validationResult,
           latencyMs: log.latencyMs,
         }))
       )
@@ -359,9 +503,15 @@ export async function POST(request: Request) {
         .returning({ id: dietPlanDays.id })
 
       for (const [slotOrder, meal] of day.meals.entries()) {
+        // Observability only (Meal Archetype layer) — never read by
+        // nutrition math. null whenever no archetype applied, which is
+        // exactly what every diet_plan_meals row looked like before this
+        // layer existed.
+        const archetypeId =
+          archetypeAssignmentsByDay[day.dayIndex]?.find((a) => a.slot === meal.slot)?.archetypeId ?? null
         const [mealRow] = await tx
           .insert(dietPlanMeals)
-          .values({ dietPlanDayId: dayRow.id, slot: meal.slot, slotOrder })
+          .values({ dietPlanDayId: dayRow.id, slot: meal.slot, slotOrder, archetypeId })
           .returning({ id: dietPlanMeals.id })
 
         if (meal.items.length > 0) {

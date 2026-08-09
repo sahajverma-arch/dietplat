@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest"
 import type { RoadmapResult } from "@/lib/counselling/roadmap"
 import { buildGuidelines, buildNarrative, categoryNarrative, dateLabel, joinNatural, numberWord, slugify, topFoodNames } from "./plan-guidelines"
 import { makeFood } from "./test-fixtures"
-import type { PlanViewDay } from "./plan-guidelines"
+import type { PlanViewDay, PlanViewMeal } from "./plan-guidelines"
 import { ZERO_COUNTS } from "./table-4-1"
 
 function makeRoadmapOutput(overrides: Partial<RoadmapResult> = {}): RoadmapResult {
@@ -44,7 +44,8 @@ function makeRoadmapOutput(overrides: Partial<RoadmapResult> = {}): RoadmapResul
   }
 }
 
-function makeDay(dayIndex: number, meals: PlanViewDay["meals"]): PlanViewDay {
+function makeDay(dayIndex: number, mealsInput: Omit<PlanViewMeal, "archetypeId" | "archetypeName" | "archetypeDishFamilyIdsByExchangeType">[]): PlanViewDay {
+  const meals: PlanViewMeal[] = mealsInput.map((m) => ({ ...m, archetypeId: null, archetypeName: null, archetypeDishFamilyIdsByExchangeType: {} }))
   const totals = meals.reduce(
     (acc, m) => ({
       kcal: acc.kcal + m.totals.kcal,
@@ -126,6 +127,7 @@ function itemFor(food: ReturnType<typeof makeFood>) {
     proteinG: 0,
     carbsG: 0,
     fatG: 0,
+    dishFamilyId: food.dishFamilyId,
   }
 }
 

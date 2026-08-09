@@ -16,7 +16,22 @@
 import { asc, eq, inArray } from "drizzle-orm"
 
 import { db } from "@/db"
-import { clients, dietPlanDays, dietPlanItems, dietPlanMeals, dietPlans, foods, profiles, roadmaps } from "@/db/schema"
+import {
+  archetypeComponents,
+  clients,
+  dietPlanDays,
+  dietPlanItems,
+  dietPlanMeals,
+  dietPlans,
+  dishCombinations,
+  foods,
+  mealArchetypes,
+  profiles,
+  roadmaps,
+  vegetableDishCombinationMembers,
+  vegetableDishCombinations,
+} from "@/db/schema"
+import type { DishCombination, VegetableDishCombination, VegetableDishCombinationMember } from "@/db/schema"
 import type { Category, Macros, RoadmapFlag } from "@/lib/counselling/types"
 import type { ProteinRampRow } from "@/lib/counselling/protein-ramp"
 import type { RoadmapResult } from "@/lib/counselling/roadmap"
@@ -77,6 +92,11 @@ export interface PlanViewModel {
   guidelines: GuidelineBullet[]
   foodsToAvoid: string[]
   narrative: string
+  /** Dish Composition Layer, stage 2 input — see dish-combination.ts. All active rows, unfiltered by region (the consumer filters). */
+  dishCombinations: DishCombination[]
+  /** Dish Composition Layer, stage 3 input — see vegetable-dish-naming.ts. All active rows plus their member rows, unfiltered by region (the consumer filters). */
+  vegetableDishCombinations: VegetableDishCombination[]
+  vegetableDishCombinationMembers: VegetableDishCombinationMember[]
 }
 
 export class PlanNotFoundError extends Error {
@@ -151,8 +171,47 @@ export async function loadPlanViewModel(planId: string): Promise<PlanViewModel> 
       proteinG: macros.proteinG * item.exchangeCount,
       carbsG: macros.carbsG * item.exchangeCount,
       fatG: macros.fatG * item.exchangeCount,
+      dishFamilyId: food.dishFamilyId,
     })
     itemsByMealId.set(item.dietPlanMealId, list)
+  }
+
+  // Dish Composition Layer, stage 1 input — names for whichever
+  // meal_archetypes were actually used at generation time (currently South
+  // Indian breakfast only; every other meal's archetypeId is null and gets
+  // archetypeName: null below). Presentation only — never affects which
+  // foods were selected, only what a meal is later labelled as.
+  const archetypeIds = [...new Set(mealRows.map((m) => m.archetypeId).filter((id): id is string => id !== null))]
+  const archetypeNameById = new Map<string, string>()
+  // Each archetype's OWN declared dish_family_ids, keyed by exchange type —
+  // see dish-combination.ts's archetype-name-merge gate. The weekly-union
+  // narrowing (eligibleFoodsBySlot is day-invariant) means the food
+  // actually selected on a given day can drift from what that day's
+  // archetype intended (checkArchetypeAdherence's "partial" case), so the
+  // merge must verify the SPECIFIC selected foods' dish_family_ids against
+  // this, not just "does the archetype have a pulse role at all".
+  const dishFamilyIdsByExchangeTypeByArchetype = new Map<string, Partial<Record<ExchangeCode, string[]>>>()
+  if (archetypeIds.length > 0) {
+    const archetypeRows = await db
+      .select({ id: mealArchetypes.id, name: mealArchetypes.name })
+      .from(mealArchetypes)
+      .where(inArray(mealArchetypes.id, archetypeIds))
+    for (const a of archetypeRows) archetypeNameById.set(a.id, a.name)
+
+    const componentRows = await db
+      .select({
+        archetypeId: archetypeComponents.archetypeId,
+        exchangeType: archetypeComponents.exchangeType,
+        dishFamilyIds: archetypeComponents.dishFamilyIds,
+      })
+      .from(archetypeComponents)
+      .where(inArray(archetypeComponents.archetypeId, archetypeIds))
+    for (const row of componentRows) {
+      const byType = dishFamilyIdsByExchangeTypeByArchetype.get(row.archetypeId) ?? {}
+      const exchangeType = row.exchangeType as ExchangeCode
+      byType[exchangeType] = [...(byType[exchangeType] ?? []), ...row.dishFamilyIds]
+      dishFamilyIdsByExchangeTypeByArchetype.set(row.archetypeId, byType)
+    }
   }
 
   const mealsByDayId = new Map<string, PlanViewMeal[]>()
@@ -175,6 +234,11 @@ export async function loadPlanViewModel(planId: string): Promise<PlanViewModel> 
       items,
       totals,
       calPercent: 0, // filled in once the day total is known
+      archetypeId: meal.archetypeId,
+      archetypeName: meal.archetypeId ? (archetypeNameById.get(meal.archetypeId) ?? null) : null,
+      archetypeDishFamilyIdsByExchangeType: meal.archetypeId
+        ? (dishFamilyIdsByExchangeTypeByArchetype.get(meal.archetypeId) ?? {})
+        : {},
     })
     mealsByDayId.set(meal.dietPlanDayId, list)
   }
@@ -259,6 +323,28 @@ export async function loadPlanViewModel(planId: string): Promise<PlanViewModel> 
     allFoods,
   })
 
+  // Dish Composition Layer, stage 2 input — every active combination row;
+  // combineDishGroups() filters by region and matches by dish_family_id at
+  // render time. Small, unconditionally cheap to load (a handful of rows).
+  const dishCombinationRows = await db.select().from(dishCombinations).where(eq(dishCombinations.isActive, true))
+
+  // Dish Composition Layer, stage 3 input — see vegetable-dish-naming.ts.
+  const vegetableDishCombinationRows = await db
+    .select()
+    .from(vegetableDishCombinations)
+    .where(eq(vegetableDishCombinations.isActive, true))
+  const vegetableDishCombinationMemberRows = vegetableDishCombinationRows.length
+    ? await db
+        .select()
+        .from(vegetableDishCombinationMembers)
+        .where(
+          inArray(
+            vegetableDishCombinationMembers.vegetableDishCombinationId,
+            vegetableDishCombinationRows.map((c) => c.id)
+          )
+        )
+    : []
+
   return {
     plan: {
       id: plan.id,
@@ -297,6 +383,9 @@ export async function loadPlanViewModel(planId: string): Promise<PlanViewModel> 
     guidelines,
     foodsToAvoid,
     narrative,
+    dishCombinations: dishCombinationRows,
+    vegetableDishCombinations: vegetableDishCombinationRows,
+    vegetableDishCombinationMembers: vegetableDishCombinationMemberRows,
   }
 }
 

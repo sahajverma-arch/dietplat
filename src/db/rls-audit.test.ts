@@ -48,6 +48,12 @@ const TABLES = [
   "diet_plan_items",
   "plan_generation_runs",
   "plan_generation_requests",
+  "dish_families",
+  "meal_archetypes",
+  "archetype_components",
+  "dish_combinations",
+  "vegetable_dish_combinations",
+  "vegetable_dish_combination_members",
 ]
 
 describe.skipIf(!url || !anonKey)("RLS audit — anon key reads zero rows on every table", () => {

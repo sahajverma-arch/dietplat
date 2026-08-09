@@ -68,6 +68,19 @@ export function filterEligibleFoods(allFoods: Food[], criteria: EligibilityCrite
 }
 
 /**
+ * Optional archetype narrowing, keyed the same way as the function's
+ * result (slot -> exchangeType -> ...). When a meal-archetype component
+ * applies to a given (slot, exchangeType), its acceptable dish_family ids
+ * go here; eligibleFoodsForSkeleton() then restricts that one bucket to
+ * foods carrying one of those families — see archetype-selector.ts and
+ * CLAUDE.md-adjacent "Meal Archetype + Dish Composition layer" design.
+ * Entirely optional and additive: omitting it (or the route never being
+ * able to select an archetype for a slot) produces byte-identical output
+ * to the pre-archetype eligibility pipeline.
+ */
+export type DishFamilyConstraintsBySlot = Record<string, Partial<Record<ExchangeCode, string[]>>>
+
+/**
  * Groups already-filtered foods by (slot, exchangeType) for a skeleton. If
  * any slot/exchangeType the skeleton actually needs has zero candidates,
  * replays the filter pipeline against just that exchange type to name
@@ -77,7 +90,8 @@ export function filterEligibleFoods(allFoods: Food[], criteria: EligibilityCrite
 export function eligibleFoodsForSkeleton(
   allFoods: Food[],
   criteria: EligibilityCriteria,
-  neededSlotsByExchangeType: Map<ExchangeCode, Set<string>>
+  neededSlotsByExchangeType: Map<ExchangeCode, Set<string>>,
+  dishFamilyConstraints?: DishFamilyConstraintsBySlot
 ): Record<string, Partial<Record<ExchangeCode, Food[]>>> {
   const eligible = filterEligibleFoods(allFoods, criteria)
   const result: Record<string, Partial<Record<ExchangeCode, Food[]>>> = {}
@@ -89,8 +103,22 @@ export function eligibleFoodsForSkeleton(
       if (forSlot.length === 0) {
         throw diagnoseEmptySet(allFoods, criteria, exchangeType, slot)
       }
+
+      const dishFamilyIds = dishFamilyConstraints?.[slot]?.[exchangeType]
+      let finalForSlot = forSlot
+      if (dishFamilyIds && dishFamilyIds.length > 0) {
+        const narrowed = forSlot.filter((f) => f.dishFamilyId !== null && dishFamilyIds.includes(f.dishFamilyId))
+        // Graceful per-component fallback: an archetype-narrowed pool that
+        // comes up empty (e.g. nobody's tagged a food with this family
+        // yet) degrades to the wider exchange-type pool for just this one
+        // component, rather than failing the whole slot. NoEligibleFoodsError
+        // is reserved for the pre-archetype case above, which is a real
+        // data gap (no candidates at all), not a curation-in-progress gap.
+        finalForSlot = narrowed.length > 0 ? narrowed : forSlot
+      }
+
       result[slot] ??= {}
-      result[slot][exchangeType] = forSlot
+      result[slot][exchangeType] = finalForSlot
     }
   }
 

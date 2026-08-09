@@ -9,6 +9,7 @@
 import type { ExchangeCode } from "./table-4-1"
 import type { FoodSelectorInput, Selection } from "./food-selector-types"
 import type { LlmSelection } from "./food-selector-schema"
+import type { ArchetypeAssignment } from "./archetype-selector"
 
 const FLOAT_TOLERANCE = 1e-6
 
@@ -117,6 +118,75 @@ export function validateSelection(selection: Selection, input: FoodSelectorInput
   errors.push(...validateRotationRules(selection))
 
   return errors
+}
+
+export interface ArchetypeAdherenceEntry {
+  dayIndex: number
+  slot: string
+  archetypeId: string
+  archetypeCode: string
+  adherence: "full" | "partial" | "none"
+  matchedComponents: number
+  totalComponents: number
+}
+
+/**
+ * Informational only — NEVER added to validateSelection()'s errors array
+ * and never blocks or retries a generation attempt. Checks whether the
+ * foods actually selected for an archetype-assigned slot carry the
+ * dish_family its required components asked for. A miss here means the
+ * LLM (or, in the per-component graceful-degrade edge case in
+ * eligible-foods.ts, the fallback selector) picked a food outside the
+ * intended dish family while still satisfying every hard exchange-count
+ * rule above — a quality signal for observability (see
+ * plan_generation_runs.validation_result), not a correctness one. Nutrition
+ * validation (quantity.ts's assertWithinTolerance) is completely separate
+ * and unaffected by anything in this function.
+ */
+export function checkArchetypeAdherence(
+  selection: Selection,
+  archetypeAssignmentsByDay: ArchetypeAssignment[][],
+  input: FoodSelectorInput
+): ArchetypeAdherenceEntry[] {
+  const entries: ArchetypeAdherenceEntry[] = []
+
+  for (const day of selection.days) {
+    const dayArchetypes = archetypeAssignmentsByDay[day.dayIndex]
+    if (!dayArchetypes) continue
+
+    for (const meal of day.meals) {
+      const assignment = dayArchetypes.find((a) => a.slot === meal.slot)
+      if (!assignment || !assignment.archetypeId) continue
+
+      const requiredComponents = assignment.components.filter((c) => c.isRequired)
+      let matched = 0
+      for (const component of requiredComponents) {
+        const itemsOfType = meal.items.filter((i) => i.exchangeType === component.exchangeType)
+        const slotBucket = input.eligibleFoodsBySlot[meal.slot]?.[component.exchangeType] ?? []
+        const satisfied = itemsOfType.some((item) => {
+          const food = slotBucket.find((f) => f.id === item.foodId)
+          return !!food?.dishFamilyId && component.dishFamilyIds.includes(food.dishFamilyId)
+        })
+        if (satisfied) matched += 1
+      }
+
+      const total = requiredComponents.length
+      const adherence: ArchetypeAdherenceEntry["adherence"] =
+        total === 0 || matched === total ? "full" : matched > 0 ? "partial" : "none"
+
+      entries.push({
+        dayIndex: day.dayIndex,
+        slot: meal.slot,
+        archetypeId: assignment.archetypeId,
+        archetypeCode: assignment.archetypeCode ?? "",
+        adherence,
+        matchedComponents: matched,
+        totalComponents: total,
+      })
+    }
+  }
+
+  return entries
 }
 
 function validateRotationRules(selection: Selection): string[] {

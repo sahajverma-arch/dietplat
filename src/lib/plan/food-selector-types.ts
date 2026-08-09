@@ -1,6 +1,7 @@
 import type { Food } from "@/db/schema"
 import type { ExchangeCode } from "./table-4-1"
 import type { Skeleton } from "./meal-distributor"
+import type { ArchetypeAssignment } from "./archetype-selector"
 
 export interface PreviousWeekItem {
   exchangeType: ExchangeCode
@@ -13,7 +14,7 @@ export interface FoodSelectorInput {
   dietType: string
   mealCount: number
   skeleton: Skeleton
-  /** From eligible-foods.ts's eligibleFoodsForSkeleton() — already region/diet/allergen/dislike/medical filtered. */
+  /** From eligible-foods.ts's eligibleFoodsForSkeleton() — already region/diet/allergen/dislike/medical filtered, AND already archetype-narrowed wherever an archetype applied. */
   eligibleFoodsBySlot: Record<string, Partial<Record<ExchangeCode, Food[]>>>
   /**
    * Continues the fallback selector's day-based rotation across weeks
@@ -24,6 +25,16 @@ export interface FoodSelectorInput {
   dayIndexOffset?: number
   /** Previous week's last day (dayIndex 6), by slot — the LLM prompt asks day 0 not to repeat these; the fallback selector already avoids them via dayIndexOffset. */
   previousWeekLastDay?: Record<string, PreviousWeekItem[]>
+  /**
+   * From archetype-selector.ts's selectArchetypesForWeek() — index 0-6 =
+   * dayIndex. Purely guidance: eligibleFoodsBySlot was already narrowed by
+   * this before it got here, so the LLM path only needs this to describe
+   * WHY a pool looks the way it does; the fallback path never reads it at
+   * all (it just rotates the already-narrowed pool, unchanged). Omitted or
+   * every entry null when no archetype applies — see archetype-selector.ts's
+   * own null-when-disabled/no-data behaviour.
+   */
+  archetypeAssignmentsByDay?: ArchetypeAssignment[][]
 }
 
 export interface SelectedItem {

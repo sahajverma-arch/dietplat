@@ -115,10 +115,142 @@ export const foods = pgTable("foods", {
   isActive: boolean("is_active").notNull().default(true),
   notes: text("notes"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  // Nullable — most foods (generic sides, fruit, fat) never need one; only
+  // foods that serve as a meal-archetype component do. See dish_families
+  // below and CLAUDE.md-adjacent design doc "Meal Archetype + Dish
+  // Composition layer". Postgres enforces at write time (a trigger) that
+  // this can only reference a dish_family whose own exchange_type matches
+  // this food's exchangeType.
+  dishFamilyId: uuid("dish_family_id").references(() => dishFamilies.id),
 })
 
 export type Food = typeof foods.$inferSelect
 export type NewFood = typeof foods.$inferInsert
+
+/**
+ * A small, closed vocabulary identifying a specific dish identity (e.g.
+ * "sambar"), same pattern as exchangeTypes. archetype_components point at
+ * a SET of these — never a raw exchange type, never a free-text tag — so
+ * the eligible pool for one archetype's role can never silently admit an
+ * unrelated dish of the same exchange type (Idli-Sambar's pulse role
+ * pointing at the "sambar" family excludes Masoor Dal/Kala Chana/Moong Dal
+ * structurally, not by curation discipline alone).
+ */
+export const dishFamilies = pgTable("dish_families", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  code: text("code").notNull().unique(),
+  name: text("name").notNull(),
+  exchangeType: text("exchange_type")
+    .notNull()
+    .references(() => exchangeTypes.code),
+  notes: text("notes"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+})
+
+export type DishFamily = typeof dishFamilies.$inferSelect
+
+/**
+ * A named, curator-approved COMPLETE meal (e.g. "Idli-Sambar"), not a
+ * single dish — see the "Complete Meal Identity" design decision. Region-
+ * and slot-scoped; meal_templates (the exchange-count skeleton shape)
+ * stays completely untouched by this — an archetype only narrows which
+ * foods are eligible to fill a slot the existing pipeline already solved.
+ */
+export const mealArchetypes = pgTable("meal_archetypes", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  code: text("code").notNull().unique(),
+  name: text("name").notNull(),
+  region: text("region").notNull(),
+  slot: text("slot").notNull(),
+  dietTypes: text("diet_types").array().notNull().default([]),
+  // 0-1, curator-assigned — weights rotation frequency only, never a hard
+  // eligibility filter. See archetype-selector.ts.
+  authenticityScore: numeric("authenticity_score", { mode: "number" }).notNull().default(1.0),
+  isActive: boolean("is_active").notNull().default(true),
+  notes: text("notes"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+})
+
+export type MealArchetype = typeof mealArchetypes.$inferSelect
+
+/** The named roles within an archetype (e.g. "lentil curry"), each pointing at one or more dish_families. */
+export const archetypeComponents = pgTable("archetype_components", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  archetypeId: uuid("archetype_id")
+    .notNull()
+    .references(() => mealArchetypes.id, { onDelete: "cascade" }),
+  // Display label only (e.g. "Lentil curry") — NOT the matching key.
+  componentRole: text("component_role").notNull(),
+  // A SET of acceptable families, not one — lets one archetype (e.g.
+  // "Everyday North Indian Thali") accept any of several dals for its
+  // pulse role, while rigid-pairing cuisines keep this to a single family.
+  dishFamilyIds: uuid("dish_family_ids").array().notNull().default([]),
+  // Redundant with dishFamilies.exchangeType by construction — a second,
+  // cheap integrity check at archetype-authoring time.
+  exchangeType: text("exchange_type")
+    .notNull()
+    .references(() => exchangeTypes.code),
+  componentOrder: integer("component_order").notNull().default(0),
+  isRequired: boolean("is_required").notNull().default(true),
+  notes: text("notes"),
+})
+
+export type ArchetypeComponent = typeof archetypeComponents.$inferSelect
+
+/**
+ * Dish Composition Layer, stage 2 — combines an already-composed cereal
+ * group with an already-composed pulse dish into one named combo (e.g.
+ * "Rajma Chawal") for meals with no meal_archetype driving the pairing.
+ * Reuses dish_families as its matching key, same pattern as
+ * archetype_components. See src/lib/plan/dish-combination.ts.
+ */
+export const dishCombinations = pgTable("dish_combinations", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  code: text("code").notNull().unique(),
+  displayName: text("display_name").notNull(),
+  primaryDishFamilyId: uuid("primary_dish_family_id")
+    .notNull()
+    .references(() => dishFamilies.id),
+  secondaryDishFamilyId: uuid("secondary_dish_family_id")
+    .notNull()
+    .references(() => dishFamilies.id),
+  region: text("region"),
+  isActive: boolean("is_active").notNull().default(true),
+})
+
+export type DishCombination = typeof dishCombinations.$inferSelect
+
+/**
+ * Dish Composition Layer, stage 3 — names a curated SET of 2+ vegetables
+ * (e.g. Drumstick + Ash gourd + Yam -> "Avial") that meal-composition.ts's
+ * vegetable pooling would otherwise always render as the generic "Mixed
+ * Vegetable {RegionWord}". Unlike dish_combinations (a fixed cereal+pulse
+ * PAIR, two FK columns), a vegetable dish can have 2-4 members and the
+ * pool of candidate vegetables varies day to day, so membership is a
+ * separate join table (vegetable_dish_combination_members) rather than
+ * fixed columns. See src/lib/plan/vegetable-dish-naming.ts.
+ */
+export const vegetableDishCombinations = pgTable("vegetable_dish_combinations", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  code: text("code").notNull().unique(),
+  displayName: text("display_name").notNull(),
+  region: text("region"),
+  isActive: boolean("is_active").notNull().default(true),
+})
+
+export type VegetableDishCombination = typeof vegetableDishCombinations.$inferSelect
+
+export const vegetableDishCombinationMembers = pgTable("vegetable_dish_combination_members", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  vegetableDishCombinationId: uuid("vegetable_dish_combination_id")
+    .notNull()
+    .references(() => vegetableDishCombinations.id, { onDelete: "cascade" }),
+  dishFamilyId: uuid("dish_family_id")
+    .notNull()
+    .references(() => dishFamilies.id),
+})
+
+export type VegetableDishCombinationMember = typeof vegetableDishCombinationMembers.$inferSelect
 
 export const mealTemplates = pgTable("meal_templates", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -192,6 +324,9 @@ export const dietPlanMeals = pgTable("diet_plan_meals", {
     .references(() => dietPlanDays.id, { onDelete: "cascade" }),
   slot: text("slot").notNull(),
   slotOrder: integer("slot_order").notNull(),
+  // Observability only — never read by nutrition math. Nullable, set null
+  // on archetype deletion so retiring an archetype can't corrupt history.
+  archetypeId: uuid("archetype_id").references(() => mealArchetypes.id, { onDelete: "set null" }),
 })
 
 export type DietPlanMeal = typeof dietPlanMeals.$inferSelect

@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest"
 
-import { validateSelection } from "./food-selector-validate"
+import { checkArchetypeAdherence, validateSelection } from "./food-selector-validate"
 import { makeFood } from "./test-fixtures"
+import type { ArchetypeAssignment } from "./archetype-selector"
 import type { FoodSelectorInput, Selection, SelectedDay } from "./food-selector-types"
 
 const roti = makeFood({ id: "roti", nameEn: "Roti", exchangeType: "cereal" })
@@ -155,5 +156,93 @@ describe("validateSelection — rotation rule violations", () => {
     dinnerFruit.foodId = breakfastFruit.foodId
     const errors = validateSelection(selection, input)
     expect(errors.some((e) => e.includes("is repeated across slots on the same day"))).toBe(true)
+  })
+})
+
+describe("checkArchetypeAdherence", () => {
+  const idli = makeFood({ id: "idli", nameEn: "Idli", exchangeType: "cereal", dishFamilyId: "idli-family" })
+  const dosa = makeFood({ id: "dosa", nameEn: "Dosa", exchangeType: "cereal", dishFamilyId: "dosa-family" })
+  const sambar = makeFood({ id: "sambar", nameEn: "Sambar", exchangeType: "pulse", dishFamilyId: "sambar-family" })
+  const masoorDalFood = makeFood({ id: "masoor2", nameEn: "Masoor Dal", exchangeType: "pulse", dishFamilyId: "masoor-family" })
+
+  const archetypeInput: FoodSelectorInput = {
+    region: "south_indian",
+    dietType: "vegetarian",
+    mealCount: 5,
+    skeleton: { breakfast: [{ exchangeType: "cereal", count: 2 }, { exchangeType: "pulse", count: 0.5 }] },
+    eligibleFoodsBySlot: { breakfast: { cereal: [idli, dosa], pulse: [sambar, masoorDalFood] } },
+  }
+
+  const idliSambarAssignment: ArchetypeAssignment = {
+    slot: "breakfast",
+    archetypeId: "idli-sambar",
+    archetypeCode: "south_indian_idli_sambar",
+    archetypeName: "Idli with Sambar",
+    components: [
+      { role: "steamed_batter_cereal", dishFamilyIds: ["idli-family"], exchangeType: "cereal", isRequired: true },
+      { role: "lentil_curry", dishFamilyIds: ["sambar-family"], exchangeType: "pulse", isRequired: true },
+    ],
+  }
+
+  function selectionWith(cerealFoodId: string, pulseFoodId: string): Selection {
+    return {
+      days: [
+        {
+          dayIndex: 0,
+          meals: [
+            {
+              slot: "breakfast",
+              items: [
+                { foodId: cerealFoodId, exchangeType: "cereal", exchangeCount: 2 },
+                { foodId: pulseFoodId, exchangeType: "pulse", exchangeCount: 0.5 },
+              ],
+            },
+          ],
+        },
+      ],
+    }
+  }
+
+  it("reports 'full' adherence when every required component's food matches the archetype's dish families", () => {
+    const result = checkArchetypeAdherence(selectionWith(idli.id, sambar.id), [[idliSambarAssignment]], archetypeInput)
+    expect(result).toEqual([
+      {
+        dayIndex: 0,
+        slot: "breakfast",
+        archetypeId: "idli-sambar",
+        archetypeCode: "south_indian_idli_sambar",
+        adherence: "full",
+        matchedComponents: 2,
+        totalComponents: 2,
+      },
+    ])
+  })
+
+  it("reports 'partial' adherence when only one required component matches", () => {
+    const result = checkArchetypeAdherence(selectionWith(idli.id, masoorDalFood.id), [[idliSambarAssignment]], archetypeInput)
+    expect(result[0].adherence).toBe("partial")
+    expect(result[0].matchedComponents).toBe(1)
+  })
+
+  it("reports 'none' when no required component matches", () => {
+    const result = checkArchetypeAdherence(selectionWith(dosa.id, masoorDalFood.id), [[idliSambarAssignment]], archetypeInput)
+    expect(result[0].adherence).toBe("none")
+    expect(result[0].matchedComponents).toBe(0)
+  })
+
+  it("returns an empty array when no slot has an archetype assignment (archetypeId: null everywhere)", () => {
+    const noArchetype: ArchetypeAssignment = { slot: "breakfast", archetypeId: null, archetypeCode: null, archetypeName: null, components: [] }
+    const result = checkArchetypeAdherence(selectionWith(dosa.id, masoorDalFood.id), [[noArchetype]], archetypeInput)
+    expect(result).toEqual([])
+  })
+
+  it("is purely informational — an off-archetype selection that is otherwise well-formed still produces zero errors from validateSelection", () => {
+    const offArchetype = selectionWith(dosa.id, masoorDalFood.id)
+    // Sanity: this selection intentionally mismatches the archetype (Q above
+    // confirms adherence: "none"), yet the hard structural/rotation
+    // validator must not know or care about archetypes at all.
+    const singleDayInput: FoodSelectorInput = { ...archetypeInput, mealCount: 5 }
+    const errors = validateSelection(offArchetype, singleDayInput).filter((e) => !e.includes("is missing from the response"))
+    expect(errors).toEqual([])
   })
 })

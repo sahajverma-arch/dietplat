@@ -13,7 +13,10 @@ export const SYSTEM_PROMPT =
   "Never output quantities, calories or macros — quantities are fixed by the exchange system. " +
   "For every slot, the sum of exchangeCount you output per exchangeType must exactly equal the count given to you " +
   "for that slot and exchangeType — you may split that count across more than one food of the same exchangeType " +
-  "if the rotation rules below ask for it, but the total must match exactly."
+  "if the rotation rules below ask for it, but the total must match exactly. " +
+  "When a day's slot has an archetypeHint, treat it as the intended dish combination for that meal — prefer foods " +
+  "whose role matches each named component, so the meal reads as that authentic dish rather than an arbitrary " +
+  "combination. This is guidance, not a hard constraint — the exchange-count rules above always take priority."
 
 export const ROTATION_RULES = [
   "Do not repeat the same cereal item in the same slot on consecutive days.",
@@ -36,6 +39,11 @@ interface UserPromptFoodOption {
   tags: string[]
 }
 
+interface UserPromptArchetypeHint {
+  name: string
+  components: { role: string; exchangeType: string }[]
+}
+
 interface UserPromptPayload {
   region: string
   dietType: string
@@ -45,6 +53,8 @@ interface UserPromptPayload {
   eligibleFoods: Record<string, Record<string, UserPromptFoodOption[]>>
   rotationRules: string[]
   previousWeekLastDay?: Record<string, { exchangeType: string; foodId: string; name: string }[]>
+  /** Keyed by dayIndex (as a string, since JSON object keys always are), then slot. Only present for (day, slot) pairs where archetype-selector.ts actually chose an archetype. */
+  archetypeHints?: Record<string, Record<string, UserPromptArchetypeHint>>
 }
 
 export function buildUserPromptPayload(input: FoodSelectorInput): UserPromptPayload {
@@ -78,6 +88,21 @@ export function buildUserPromptPayload(input: FoodSelectorInput): UserPromptPayl
     )
   }
 
+  let archetypeHints: UserPromptPayload["archetypeHints"]
+  if (input.archetypeAssignmentsByDay) {
+    for (const [dayIndex, assignments] of input.archetypeAssignmentsByDay.entries()) {
+      for (const assignment of assignments) {
+        if (!assignment.archetypeId || !assignment.archetypeName) continue
+        archetypeHints ??= {}
+        archetypeHints[String(dayIndex)] ??= {}
+        archetypeHints[String(dayIndex)][assignment.slot] = {
+          name: assignment.archetypeName,
+          components: assignment.components.map((c) => ({ role: c.role, exchangeType: c.exchangeType })),
+        }
+      }
+    }
+  }
+
   return {
     region: input.region,
     dietType: input.dietType,
@@ -87,6 +112,7 @@ export function buildUserPromptPayload(input: FoodSelectorInput): UserPromptPayl
     eligibleFoods,
     rotationRules,
     previousWeekLastDay,
+    archetypeHints,
   }
 }
 

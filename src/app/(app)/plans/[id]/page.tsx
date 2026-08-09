@@ -2,9 +2,9 @@ import { notFound } from "next/navigation"
 
 import { Card, CardContent } from "@/components/ui/card"
 import { Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { ComposedMealCell } from "@/components/plan/composed-meal-cell"
 import { MacroDonut } from "@/components/plan/macro-donut"
 import { PlanActionsBar } from "@/components/plan/plan-actions-bar"
-import { SwapItemButton } from "@/components/plan/swap-item-button"
 import { formatBmi, formatGrams, formatKcal, formatWeight } from "@/lib/format"
 import { ACCEPTANCE_FRACTION } from "@/lib/plan/exchange-solver"
 import { PlanNotFoundError, planDateRangeLabel, loadPlanViewModel } from "@/lib/plan/plan-view-model"
@@ -20,7 +20,22 @@ export default async function PlanPage({ params }: { params: Promise<{ id: strin
     throw err
   }
 
-  const { plan, client, roadmap, targets, deviationPct, days, weeklySummary, weeklyAvg, guidelines, foodsToAvoid, narrative } = model
+  const {
+    plan,
+    client,
+    roadmap,
+    targets,
+    deviationPct,
+    days,
+    weeklySummary,
+    weeklyAvg,
+    guidelines,
+    foodsToAvoid,
+    narrative,
+    dishCombinations,
+    vegetableDishCombinations,
+    vegetableDishCombinationMembers,
+  } = model
 
   const withinTolerance =
     Math.abs(deviationPct.kcal) < ACCEPTANCE_FRACTION * 100 &&
@@ -120,12 +135,16 @@ export default async function PlanPage({ params }: { params: Promise<{ id: strin
                   <TableCell className="align-top">{meal.timeLabel}</TableCell>
                   <TableCell className="align-top font-medium">{meal.slotLabel}</TableCell>
                   <TableCell className="whitespace-normal align-top">
-                    {meal.items.map((item, i) => (
-                      <span key={item.id}>
-                        <SwapItemButton item={item} editable={editable} />
-                        {i < meal.items.length - 1 ? ", " : ""}
-                      </span>
-                    ))}
+                    <ComposedMealCell
+                      items={meal.items}
+                      region={plan.region}
+                      editable={editable}
+                      archetypeName={meal.archetypeName}
+                      archetypeDishFamilyIdsByExchangeType={meal.archetypeDishFamilyIdsByExchangeType}
+                      dishCombinations={dishCombinations}
+                      vegetableDishCombinations={vegetableDishCombinations}
+                      vegetableDishCombinationMembers={vegetableDishCombinationMembers}
+                    />
                   </TableCell>
                   <TableCell className="text-right align-top">{formatKcal(meal.totals.kcal)}</TableCell>
                   <TableCell className="text-right align-top">{formatGrams(meal.totals.proteinG)}g</TableCell>

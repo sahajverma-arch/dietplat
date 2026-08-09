@@ -8,13 +8,23 @@ import { getSwapCandidates, swapPlanItem, type SwapCandidate } from "@/app/(app)
 import { formatItemLabel } from "@/lib/plan/format-item"
 import type { PlanViewItem } from "@/lib/plan/plan-view-model"
 
-export function SwapItemButton({ item, editable }: { item: PlanViewItem; editable: boolean }) {
+export function SwapItemButton({
+  item,
+  editable,
+  label,
+}: {
+  item: PlanViewItem
+  editable: boolean
+  /** Presentation-layer override (e.g. "Rajma Curry (15 g)" instead of "Rajma (15 g)") — see meal-composition.ts. Defaults to the plain per-item label; swap behaviour and the underlying item are always unaffected. */
+  label?: string
+}) {
   const [open, setOpen] = useState(false)
   const [candidates, setCandidates] = useState<SwapCandidate[] | null>(null)
   const [isPending, startTransition] = useTransition()
+  const displayLabel = label ?? formatItemLabel(item)
 
   if (!editable) {
-    return <span>{formatItemLabel(item)}</span>
+    return <span>{displayLabel}</span>
   }
 
   function handleOpenChange(next: boolean) {
@@ -50,7 +60,7 @@ export function SwapItemButton({ item, editable }: { item: PlanViewItem; editabl
           />
         }
       >
-        {formatItemLabel(item)}
+        {displayLabel}
       </DialogTrigger>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>

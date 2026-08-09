@@ -55,6 +55,8 @@ export interface PlanViewItem {
   proteinG: number
   carbsG: number
   fatG: number
+  /** Dish Composition Layer input — see dish-combination.ts / meal-composition.ts. Never read by any nutrition calculation. */
+  dishFamilyId: string | null
 }
 
 export interface PlanViewMeal {
@@ -64,6 +66,21 @@ export interface PlanViewMeal {
   items: PlanViewItem[]
   totals: AchievedMacros
   calPercent: number
+  /** Set when this meal was generated from a meal_archetype (currently South Indian breakfast only) — null otherwise. Presentation only; never affects which foods were selected. */
+  archetypeId: string | null
+  archetypeName: string | null
+  /**
+   * The archetype's OWN declared dish_family_ids, keyed by exchange type —
+   * e.g. `{cereal: [chapatiFamilyId], pulse: [moongDalFamilyId]}`. Empty
+   * object when archetypeId is null or the archetype declares no
+   * components. See dish-combination.ts's archetype-name-merge gate: the
+   * weekly-union narrowing (eligibleFoodsBySlot is day-invariant) means the
+   * food actually selected on a given day can drift from what that day's
+   * archetype intended, so the merge must check the SPECIFIC food's
+   * dish_family_id against this, not just "does the archetype have a pulse
+   * role at all".
+   */
+  archetypeDishFamilyIdsByExchangeType: Partial<Record<ExchangeCode, string[]>>
 }
 
 export interface PlanViewDay {

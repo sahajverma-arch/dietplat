@@ -7,6 +7,14 @@ const envSchema = z.object({
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
   NVIDIA_API_KEY: z.string().min(1),
   NVIDIA_MODEL: z.string().min(1),
+  // Global kill switch for the Meal Archetype layer (archetype-selector.ts).
+  // Defaults enabled — set to "false" to force archetypeSelectorEnabled to
+  // false everywhere, independent of what's seeded in meal_archetypes, as a
+  // fast full-rollback path distinct from deleting archetype data.
+  ARCHETYPE_SELECTION_ENABLED: z
+    .string()
+    .optional()
+    .transform((v) => v !== "false"),
 })
 
 const parsed = envSchema.safeParse({
@@ -16,6 +24,7 @@ const parsed = envSchema.safeParse({
   SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY,
   NVIDIA_API_KEY: process.env.NVIDIA_API_KEY,
   NVIDIA_MODEL: process.env.NVIDIA_MODEL,
+  ARCHETYPE_SELECTION_ENABLED: process.env.ARCHETYPE_SELECTION_ENABLED,
 })
 
 if (!parsed.success) {

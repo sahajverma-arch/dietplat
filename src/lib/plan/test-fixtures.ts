@@ -22,6 +22,7 @@ export function makeFood(overrides: Partial<Food> & { exchangeType: ExchangeCode
     isActive: true,
     notes: null,
     createdAt: new Date("2026-01-01T00:00:00Z"),
+    dishFamilyId: null,
     ...overrides,
   }
 }
