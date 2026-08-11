@@ -79,6 +79,97 @@ describe("distributeMeals — Deepak Sharma's real decoded skeleton", () => {
   })
 })
 
+describe("distributeMeals — meat, meat_lean, milk_cow, milk_skim are indivisible, never split across slots", () => {
+  it("puts the full meat (egg) count in one slot, not fractioned across several", () => {
+    const counts: ExchangeCounts = { ...ZERO_COUNTS, meat: 2, cereal: 4 }
+    const skeleton = distributeMeals(counts, NORTH_INDIAN_TEMPLATES)
+    const slotsWithMeat = Object.entries(skeleton).filter(([, items]) => items.some((i) => i.exchangeType === "meat"))
+    expect(slotsWithMeat).toHaveLength(1)
+    expect(slotsWithMeat[0][0]).toBe("breakfast")
+    expect(slotsWithMeat[0][1].find((i) => i.exchangeType === "meat")?.count).toBe(2)
+  })
+
+  it("puts the full meat_lean (chicken/fish) count in one slot — dinner specifically, a dietitian directive, not just the earliest allowed slot", () => {
+    const counts: ExchangeCounts = { ...ZERO_COUNTS, meat_lean: 2, cereal: 4 }
+    const skeleton = distributeMeals(counts, NORTH_INDIAN_TEMPLATES)
+    const slotsWithMeatLean = Object.entries(skeleton).filter(([, items]) => items.some((i) => i.exchangeType === "meat_lean"))
+    expect(slotsWithMeatLean).toHaveLength(1)
+    expect(slotsWithMeatLean[0][0]).toBe("dinner")
+    expect(slotsWithMeatLean[0][1].find((i) => i.exchangeType === "meat_lean")?.count).toBe(2)
+  })
+
+  it("meat and meat_lean can land in the same day without interfering with each other", () => {
+    const counts: ExchangeCounts = { ...ZERO_COUNTS, meat: 2, meat_lean: 1, cereal: 4 }
+    const skeleton = distributeMeals(counts, NORTH_INDIAN_TEMPLATES)
+    expect(totalOf(skeleton, "meat")).toBe(2)
+    expect(totalOf(skeleton, "meat_lean")).toBe(1)
+  })
+
+  it("puts the full milk_cow count in one slot — no more 125 ml glass + 125 ml folded into evening chai", () => {
+    const counts: ExchangeCounts = { ...ZERO_COUNTS, milk_cow: 1, cereal: 4 }
+    const skeleton = distributeMeals(counts, NORTH_INDIAN_TEMPLATES)
+    const slotsWithMilk = Object.entries(skeleton).filter(([, items]) => items.some((i) => i.exchangeType === "milk_cow"))
+    expect(slotsWithMilk).toHaveLength(1)
+    expect(slotsWithMilk[0][0]).toBe("breakfast")
+    expect(slotsWithMilk[0][1].find((i) => i.exchangeType === "milk_cow")?.count).toBe(1)
+  })
+
+  it("puts the full milk_skim count in one slot", () => {
+    const counts: ExchangeCounts = { ...ZERO_COUNTS, milk_skim: 1, cereal: 4 }
+    const skeleton = distributeMeals(counts, NORTH_INDIAN_TEMPLATES)
+    const slotsWithMilkSkim = Object.entries(skeleton).filter(([, items]) => items.some((i) => i.exchangeType === "milk_skim"))
+    expect(slotsWithMilkSkim).toHaveLength(1)
+    expect(slotsWithMilkSkim[0][0]).toBe("breakfast")
+  })
+})
+
+describe("distributeMeals — a meal with meat/meat_lean gets no dal or sabzi alongside it", () => {
+  it("routes all pulse away from meat_lean's slot to the other allowed slot", () => {
+    const counts: ExchangeCounts = { ...ZERO_COUNTS, meat_lean: 2, pulse: 2, cereal: 8 }
+    const skeleton = distributeMeals(counts, NORTH_INDIAN_TEMPLATES)
+    // meat_lean always lands at dinner now (a dietitian directive) — see the indivisible-types tests above.
+    expect(skeleton.dinner.some((i) => i.exchangeType === "pulse")).toBe(false)
+    expect(skeleton.lunch.find((i) => i.exchangeType === "pulse")?.count).toBe(2)
+  })
+
+  it("routes all vegetable_a and vegetable_b away from meat_lean's slot too", () => {
+    const counts: ExchangeCounts = { ...ZERO_COUNTS, meat_lean: 2, vegetable_a: 4, vegetable_b: 2, cereal: 8 }
+    const skeleton = distributeMeals(counts, NORTH_INDIAN_TEMPLATES)
+    expect(skeleton.dinner.some((i) => i.exchangeType === "vegetable_a" || i.exchangeType === "vegetable_b")).toBe(false)
+    expect(skeleton.lunch.find((i) => i.exchangeType === "vegetable_a")?.count).toBe(4)
+    expect(skeleton.lunch.find((i) => i.exchangeType === "vegetable_b")?.count).toBe(2)
+  })
+
+  it("still allows cereal and fat alongside meat_lean in the same slot", () => {
+    const counts: ExchangeCounts = { ...ZERO_COUNTS, meat_lean: 2, cereal: 8, fat: 4 }
+    const skeleton = distributeMeals(counts, NORTH_INDIAN_TEMPLATES)
+    expect(skeleton.dinner.some((i) => i.exchangeType === "cereal")).toBe(true)
+    expect(skeleton.dinner.some((i) => i.exchangeType === "fat")).toBe(true)
+  })
+
+  it("conserves totals exactly even with the exclusion in play", () => {
+    const counts: ExchangeCounts = { ...ZERO_COUNTS, meat_lean: 2, pulse: 2, vegetable_a: 4, vegetable_b: 2, cereal: 8 }
+    const skeleton = distributeMeals(counts, NORTH_INDIAN_TEMPLATES)
+    expect(totalOf(skeleton, "pulse")).toBe(2)
+    expect(totalOf(skeleton, "vegetable_a")).toBe(4)
+    expect(totalOf(skeleton, "vegetable_b")).toBe(2)
+  })
+
+  it("does not exclude a slot if doing so would leave pulse/vegetable nowhere to go", () => {
+    // pulse's only allowed slot is dinner, the same slot meat_lean now
+    // always anchors to (the last allowed slot) — the exclusion must be
+    // skipped rather than throwing.
+    const templates: MealSlotTemplate[] = [
+      { slot: "lunch", slotOrder: 1, kcalShare: 0.5, allowedExchangeTypes: ["cereal", "meat_lean", "fat"] },
+      { slot: "dinner", slotOrder: 2, kcalShare: 0.5, allowedExchangeTypes: ["cereal", "pulse", "meat_lean", "fat"] },
+    ]
+    const counts: ExchangeCounts = { ...ZERO_COUNTS, meat_lean: 2, pulse: 2, cereal: 4 }
+    expect(() => distributeMeals(counts, templates)).not.toThrow()
+    const skeleton = distributeMeals(counts, templates)
+    expect(totalOf(skeleton, "pulse")).toBe(2)
+  })
+})
+
 describe("distributeMeals — throws rather than silently dropping exchanges", () => {
   it("throws when an exchange type has no allowed slot anywhere", () => {
     const counts: ExchangeCounts = { ...ZERO_COUNTS, sugar: 1 }

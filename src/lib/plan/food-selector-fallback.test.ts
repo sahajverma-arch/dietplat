@@ -49,13 +49,132 @@ describe("fallbackSelection", () => {
     }
   })
 
-  it("splits a splittable type (vegetable_a) with count >= 2 across 2 distinct foods", () => {
-    for (const day of selection.days) {
+  it("keeps vegetable_a a single food on 6 of 7 days, mixing on EXACTLY one designated day per week — real everyday sabzi is single-vegetable, an arbitrary 2-food mix is the rare exception", () => {
+    const counts = selection.days.map((day) => {
       const dinner = day.meals.find((m) => m.slot === "dinner")!
       const vegAItems = dinner.items.filter((i) => i.exchangeType === "vegetable_a")
-      expect(vegAItems).toHaveLength(2)
-      expect(new Set(vegAItems.map((i) => i.foodId)).size).toBe(2)
-      expect(vegAItems.every((i) => i.exchangeCount === 1)).toBe(true)
+      // Whole-day total must always equal the skeleton count, split or not.
+      expect(vegAItems.reduce((sum, i) => sum + i.exchangeCount, 0)).toBe(2)
+      return vegAItems.length
+    })
+    const mixedDays = counts.filter((n) => n === 2).length
+    const singleDays = counts.filter((n) => n === 1).length
+    // Exactly 1 in 7 — not a per-day coin flip that can collide (see isMixedVegDay's doc comment).
+    expect(mixedDays).toBe(1)
+    expect(singleDays).toBe(6)
+  })
+
+  it("splits vegetable_a into 2 distinct foods on EXACTLY one day of the week, using the whole day's exchange count", () => {
+    const largeInput: FoodSelectorInput = {
+      region: "north_indian",
+      dietType: "non_vegetarian",
+      mealCount: 5,
+      skeleton: { dinner: [{ exchangeType: "vegetable_a", count: 4 }] },
+      eligibleFoodsBySlot: { dinner: { vegetable_a: [palak, bhindi] } },
+    }
+    const largeSelection = fallbackSelection(largeInput)
+    const perDay = largeSelection.days.map((day) => {
+      const dinner = day.meals.find((m) => m.slot === "dinner")!
+      const vegAItems = dinner.items.filter((i) => i.exchangeType === "vegetable_a")
+      expect(vegAItems.reduce((sum, i) => sum + i.exchangeCount, 0)).toBe(4)
+      return vegAItems.length
+    })
+    expect(perDay.filter((n) => n === 2)).toHaveLength(1)
+    expect(perDay.filter((n) => n === 1)).toHaveLength(6)
+  })
+
+  it("the mixed-veg day shifts to a different weekday in week 2 (dayIndexOffset = 7) rather than repeating week 1's day", () => {
+    const weeklyInput: FoodSelectorInput = {
+      region: "north_indian",
+      dietType: "non_vegetarian",
+      mealCount: 5,
+      skeleton: { dinner: [{ exchangeType: "vegetable_a", count: 4 }] },
+      eligibleFoodsBySlot: { dinner: { vegetable_a: [palak, bhindi] } },
+    }
+    const mixedDayIndex = (sel: ReturnType<typeof fallbackSelection>) =>
+      sel.days.findIndex((day) => {
+        const dinner = day.meals.find((m) => m.slot === "dinner")!
+        return dinner.items.filter((i) => i.exchangeType === "vegetable_a").length === 2
+      })
+
+    const week1Index = mixedDayIndex(fallbackSelection(weeklyInput))
+    const week2Index = mixedDayIndex(fallbackSelection({ ...weeklyInput, dayIndexOffset: 7 }))
+
+    expect(week1Index).toBeGreaterThanOrEqual(0)
+    expect(week2Index).toBeGreaterThanOrEqual(0)
+    expect(week1Index).not.toBe(week2Index)
+  })
+
+  it("never mixes vegetable_a below count 2, even on the designated mixed-veg day", () => {
+    const belowThresholdInput: FoodSelectorInput = {
+      region: "north_indian",
+      dietType: "non_vegetarian",
+      mealCount: 5,
+      skeleton: { dinner: [{ exchangeType: "vegetable_a", count: 1.5 }] },
+      eligibleFoodsBySlot: { dinner: { vegetable_a: [palak, bhindi] } },
+    }
+    const belowSelection = fallbackSelection(belowThresholdInput)
+    for (const day of belowSelection.days) {
+      const dinner = day.meals.find((m) => m.slot === "dinner")!
+      const vegAItems = dinner.items.filter((i) => i.exchangeType === "vegetable_a")
+      expect(vegAItems).toHaveLength(1)
+      expect(vegAItems[0].exchangeCount).toBe(1.5)
+    }
+  })
+
+  it("excludes solo_only-tagged foods (Karela, Lauki, Brinjal, Tori) from the mixed-veg combo pool even on the designated mixed-veg day", () => {
+    const karela = makeFood({ id: "karela", nameEn: "Karela", exchangeType: "vegetable_a", tags: ["solo_only"] })
+    const lauki = makeFood({ id: "lauki", nameEn: "Lauki", exchangeType: "vegetable_a", tags: ["solo_only"] })
+    const soloOnlyInput: FoodSelectorInput = {
+      region: "north_indian",
+      dietType: "non_vegetarian",
+      mealCount: 5,
+      skeleton: { dinner: [{ exchangeType: "vegetable_a", count: 4 }] },
+      eligibleFoodsBySlot: { dinner: { vegetable_a: [karela, lauki] } },
+    }
+    const soloOnlySelection = fallbackSelection(soloOnlyInput)
+    // Both eligible foods are solo_only, so the combo pool is always empty —
+    // mixing must never happen, even on the day that would otherwise be gated in.
+    for (const day of soloOnlySelection.days) {
+      const dinner = day.meals.find((m) => m.slot === "dinner")!
+      const vegAItems = dinner.items.filter((i) => i.exchangeType === "vegetable_a")
+      expect(vegAItems).toHaveLength(1)
+      expect(vegAItems[0].exchangeCount).toBe(4)
+    }
+  })
+
+  it("preserves the exact fractional exchange count (2.5) across both split and single days", () => {
+    const fractionalInput: FoodSelectorInput = {
+      region: "north_indian",
+      dietType: "non_vegetarian",
+      mealCount: 5,
+      skeleton: { dinner: [{ exchangeType: "vegetable_a", count: 2.5 }] },
+      eligibleFoodsBySlot: { dinner: { vegetable_a: [palak, bhindi] } },
+    }
+    const fractionalSelection = fallbackSelection(fractionalInput)
+    for (const day of fractionalSelection.days) {
+      const dinner = day.meals.find((m) => m.slot === "dinner")!
+      const vegAItems = dinner.items.filter((i) => i.exchangeType === "vegetable_a")
+      expect(vegAItems.reduce((sum, i) => sum + i.exchangeCount, 0)).toBe(2.5)
+    }
+  })
+
+  it("vegetable_b never gets the large-portion split — its smaller 50 g/exchange size stays a normal single dish even at a concentrated count", () => {
+    const carrot = makeFood({ id: "carrot", nameEn: "Carrot", exchangeType: "vegetable_b" })
+    const potato = makeFood({ id: "potato", nameEn: "Potato", exchangeType: "vegetable_b" })
+    const vegBInput: FoodSelectorInput = {
+      region: "north_indian",
+      dietType: "non_vegetarian",
+      mealCount: 5,
+      skeleton: { dinner: [{ exchangeType: "vegetable_b", count: 4 }] },
+      eligibleFoodsBySlot: { dinner: { vegetable_b: [carrot, potato] } },
+    }
+    const vegBSelection = fallbackSelection(vegBInput)
+    for (const day of vegBSelection.days) {
+      const dinner = day.meals.find((m) => m.slot === "dinner")!
+      const vegBItems = dinner.items.filter((i) => i.exchangeType === "vegetable_b")
+      expect(vegBItems).toHaveLength(1)
+      expect(vegBItems[0].exchangeCount).toBe(4)
     }
   })
 
@@ -86,6 +205,25 @@ describe("fallbackSelection", () => {
       eligibleFoodsBySlot: { breakfast: { cereal: [roti, rice] }, dinner: { vegetable_a: [palak, bhindi], pulse: [] } },
     }
     expect(() => fallbackSelection(broken)).toThrow()
+  })
+
+  it("fruit still splits into 2 distinct foods at count >= 2 — unlike vegetable_a/b, this part of the original behaviour is unchanged", () => {
+    const orange = makeFood({ id: "orange", nameEn: "Orange", exchangeType: "fruit" })
+    const guava = makeFood({ id: "guava", nameEn: "Guava", exchangeType: "fruit" })
+    const fruitInput: FoodSelectorInput = {
+      region: "north_indian",
+      dietType: "vegetarian",
+      mealCount: 5,
+      skeleton: { evening: [{ exchangeType: "fruit", count: 2 }] },
+      eligibleFoodsBySlot: { evening: { fruit: [orange, guava] } },
+    }
+    const fruitSelection = fallbackSelection(fruitInput)
+    for (const day of fruitSelection.days) {
+      const evening = day.meals.find((m) => m.slot === "evening")!
+      const fruitItems = evening.items.filter((i) => i.exchangeType === "fruit")
+      expect(fruitItems).toHaveLength(2)
+      expect(new Set(fruitItems.map((i) => i.foodId)).size).toBe(2)
+    }
   })
 })
 
@@ -134,6 +272,169 @@ describe("fallbackSelection — works correctly with an archetype-narrowed pool 
     const first = fallbackSelection(narrowedInput)
     const second = fallbackSelection(narrowedInput)
     expect(first).toEqual(second)
+  })
+})
+
+describe("fallbackSelection — vegetable_a + vegetable_b never render as two separate sabzi dishes", () => {
+  const tinda = makeFood({ id: "tinda", nameEn: "Tinda", exchangeType: "vegetable_a", dishFamilyId: "tinda-family" })
+  const sweetCorn = makeFood({ id: "sweet-corn", nameEn: "Sweet corn", exchangeType: "vegetable_b" })
+  const carrot = makeFood({ id: "carrot", nameEn: "Carrot", exchangeType: "vegetable_b", tags: ["salad"] })
+  const onion = makeFood({ id: "onion", nameEn: "Onion", exchangeType: "vegetable_b", tags: ["salad"] })
+
+  it("restricts vegetable_b to salad-tagged foods when it co-occurs with vegetable_a and no curated pair is provided", () => {
+    const input: FoodSelectorInput = {
+      region: "punjabi",
+      dietType: "vegetarian",
+      mealCount: 5,
+      skeleton: {
+        lunch: [
+          { exchangeType: "vegetable_a", count: 2 },
+          { exchangeType: "vegetable_b", count: 2 },
+        ],
+      },
+      eligibleFoodsBySlot: { lunch: { vegetable_a: [tinda], vegetable_b: [sweetCorn, carrot, onion] } },
+    }
+    const selection = fallbackSelection(input)
+    for (const day of selection.days) {
+      const lunch = day.meals.find((m) => m.slot === "lunch")!
+      const vegB = lunch.items.find((i) => i.exchangeType === "vegetable_b")!
+      expect(vegB.foodId, `day ${day.dayIndex}`).not.toBe("sweet-corn")
+      expect(["carrot", "onion"]).toContain(vegB.foodId)
+    }
+  })
+
+  it("allows a non-salad vegetable_b food when the pairing matches a curated dish (Aloo Gobi-style)", () => {
+    const sweetCornCurated = makeFood({
+      id: "sweet-corn-curated",
+      nameEn: "Sweet corn",
+      exchangeType: "vegetable_b",
+      dishFamilyId: "sweet-corn-family",
+    })
+    const input: FoodSelectorInput = {
+      region: "punjabi",
+      dietType: "vegetarian",
+      mealCount: 5,
+      skeleton: {
+        lunch: [
+          { exchangeType: "vegetable_a", count: 2 },
+          { exchangeType: "vegetable_b", count: 2 },
+        ],
+      },
+      eligibleFoodsBySlot: { lunch: { vegetable_a: [tinda], vegetable_b: [sweetCornCurated] } },
+      curatedVegetableFamilyPairs: new Set(["sweet-corn-family|tinda-family"]),
+    }
+
+    const selection = fallbackSelection(input)
+    for (const day of selection.days) {
+      const lunch = day.meals.find((m) => m.slot === "lunch")!
+      const vegB = lunch.items.find((i) => i.exchangeType === "vegetable_b")!
+      expect(vegB.foodId, `day ${day.dayIndex}`).toBe("sweet-corn-curated")
+    }
+  })
+
+  it("degrades to the full pool when no salad-tagged or curated-matching food is eligible — never throws, never leaves the slot empty", () => {
+    const input: FoodSelectorInput = {
+      region: "punjabi",
+      dietType: "vegetarian",
+      mealCount: 5,
+      skeleton: {
+        lunch: [
+          { exchangeType: "vegetable_a", count: 2 },
+          { exchangeType: "vegetable_b", count: 2 },
+        ],
+      },
+      eligibleFoodsBySlot: { lunch: { vegetable_a: [tinda], vegetable_b: [sweetCorn] } },
+    }
+    expect(() => fallbackSelection(input)).not.toThrow()
+    const selection = fallbackSelection(input)
+    for (const day of selection.days) {
+      const lunch = day.meals.find((m) => m.slot === "lunch")!
+      const vegB = lunch.items.find((i) => i.exchangeType === "vegetable_b")!
+      expect(vegB.foodId).toBe("sweet-corn")
+    }
+  })
+
+  it("leaves vegetable_b's normal full-pool rotation untouched when vegetable_a isn't in the same slot", () => {
+    const input: FoodSelectorInput = {
+      region: "punjabi",
+      dietType: "vegetarian",
+      mealCount: 5,
+      skeleton: { evening: [{ exchangeType: "vegetable_b", count: 2 }] },
+      eligibleFoodsBySlot: { evening: { vegetable_b: [sweetCorn, carrot] } },
+    }
+    const selection = fallbackSelection(input)
+    const foodIds = new Set(selection.days.map((d) => d.meals.find((m) => m.slot === "evening")!.items[0].foodId))
+    expect(foodIds.size).toBeGreaterThan(1) // rotates through both, including the non-salad one
+  })
+})
+
+describe("fallbackSelection — no cooking fat alongside a plain porridge cereal", () => {
+  const oats = makeFood({ id: "oats", nameEn: "Oats", exchangeType: "cereal", tags: ["no_cooking_fat"] })
+  const paratha = makeFood({ id: "paratha", nameEn: "Aloo Paratha", exchangeType: "cereal" })
+  const ghee = makeFood({ id: "ghee", nameEn: "Ghee", exchangeType: "fat", tags: ["cooking_fat"] })
+  const almonds = makeFood({ id: "almonds", nameEn: "Almonds", exchangeType: "fat" })
+
+  it("never picks a cooking_fat-tagged food for the same slot's fat exchange when the cereal is no_cooking_fat-tagged", () => {
+    const input: FoodSelectorInput = {
+      region: "punjabi",
+      dietType: "vegetarian",
+      mealCount: 5,
+      skeleton: {
+        breakfast: [
+          { exchangeType: "cereal", count: 1 },
+          { exchangeType: "fat", count: 1 },
+        ],
+      },
+      eligibleFoodsBySlot: { breakfast: { cereal: [oats], fat: [ghee, almonds] } },
+    }
+    const selection = fallbackSelection(input)
+    for (const day of selection.days) {
+      const breakfast = day.meals.find((m) => m.slot === "breakfast")!
+      const fatItem = breakfast.items.find((i) => i.exchangeType === "fat")!
+      expect(fatItem.foodId, `day ${day.dayIndex}`).toBe("almonds")
+    }
+  })
+
+  it("leaves the fat pool unrestricted when the cereal isn't tagged no_cooking_fat (e.g. a paratha)", () => {
+    const input: FoodSelectorInput = {
+      region: "punjabi",
+      dietType: "vegetarian",
+      mealCount: 5,
+      skeleton: {
+        breakfast: [
+          { exchangeType: "cereal", count: 1 },
+          { exchangeType: "fat", count: 1 },
+        ],
+      },
+      eligibleFoodsBySlot: { breakfast: { cereal: [paratha], fat: [ghee, almonds] } },
+    }
+    const selection = fallbackSelection(input)
+    const foodIds = new Set(
+      selection.days.map((d) => d.meals.find((m) => m.slot === "breakfast")!.items.find((i) => i.exchangeType === "fat")!.foodId)
+    )
+    expect(foodIds.has("ghee")).toBe(true)
+  })
+
+  it("degrades to the full fat pool when no non-cooking-fat alternative is eligible — never throws", () => {
+    const input: FoodSelectorInput = {
+      region: "punjabi",
+      dietType: "vegetarian",
+      mealCount: 5,
+      skeleton: {
+        breakfast: [
+          { exchangeType: "cereal", count: 1 },
+          { exchangeType: "fat", count: 1 },
+        ],
+      },
+      eligibleFoodsBySlot: { breakfast: { cereal: [oats], fat: [ghee] } },
+    }
+    expect(() => fallbackSelection(input)).not.toThrow()
+    const selection = fallbackSelection(input)
+    for (const day of selection.days) {
+      const breakfast = day.meals.find((m) => m.slot === "breakfast")!
+      const fatItem = breakfast.items.find((i) => i.exchangeType === "fat")!
+      expect(fatItem.foodId).toBe("ghee")
+    }
   })
 })
 

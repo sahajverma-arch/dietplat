@@ -172,6 +172,7 @@ export async function loadPlanViewModel(planId: string): Promise<PlanViewModel> 
       carbsG: macros.carbsG * item.exchangeCount,
       fatG: macros.fatG * item.exchangeCount,
       dishFamilyId: food.dishFamilyId,
+      tags: food.tags,
     })
     itemsByMealId.set(item.dietPlanMealId, list)
   }

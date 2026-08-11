@@ -5,6 +5,7 @@ import { formatItemQuantity } from "@/lib/plan/format-item"
 import { composeMealDisplay } from "@/lib/plan/meal-composition"
 import { combineDishGroups } from "@/lib/plan/dish-combination"
 import { applyVegetableDishNames } from "@/lib/plan/vegetable-dish-naming"
+import { isMixedVegDay } from "@/lib/plan/mixed-veg-day"
 import type { PlanViewItem } from "@/lib/plan/plan-view-model"
 import type { ExchangeCode } from "@/lib/plan/table-4-1"
 import type { DishCombination, VegetableDishCombination, VegetableDishCombinationMember } from "@/db/schema"
@@ -26,6 +27,7 @@ export function ComposedMealCell({
   dishCombinations,
   vegetableDishCombinations,
   vegetableDishCombinationMembers,
+  rotationDay,
 }: {
   items: PlanViewItem[]
   region: string
@@ -37,6 +39,8 @@ export function ComposedMealCell({
   dishCombinations: DishCombination[]
   vegetableDishCombinations: VegetableDishCombination[]
   vegetableDishCombinationMembers: VegetableDishCombinationMember[]
+  /** day.dayIndex + (plan.weekNumber - 1) * 7 — same rotationDay concept the generator used, so the "one mixed-veg day a week" display gate (see vegetable-dish-naming.ts) lands on the SAME day the selector treated as special. */
+  rotationDay: number
 }) {
   const groups = applyVegetableDishNames(
     combineDishGroups(
@@ -48,7 +52,8 @@ export function ComposedMealCell({
     ),
     vegetableDishCombinations,
     vegetableDishCombinationMembers,
-    region
+    region,
+    isMixedVegDay(rotationDay)
   )
 
   return (

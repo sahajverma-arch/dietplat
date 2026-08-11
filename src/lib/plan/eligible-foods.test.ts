@@ -61,6 +61,55 @@ describe("filterEligibleFoods", () => {
     expect(result.map((f) => f.nameEn)).not.toContain("Roti")
   })
 
+  it("excludes a food whose seasons don't include the derived season", () => {
+    const winterCarrot = makeFood({ nameEn: "Carrot", exchangeType: "vegetable_b", seasons: ["winter"] })
+    const result = filterEligibleFoods([winterCarrot], {
+      region: "north_indian",
+      dietType: "vegetarian",
+      clientAllergens: [],
+      clientDislikes: [],
+      season: "monsoon",
+    })
+    expect(result).toHaveLength(0)
+  })
+
+  it("keeps a food whose seasons include the derived season", () => {
+    const monsoonLauki = makeFood({ nameEn: "Lauki", exchangeType: "vegetable_a", seasons: ["monsoon"] })
+    const result = filterEligibleFoods([monsoonLauki], {
+      region: "north_indian",
+      dietType: "vegetarian",
+      clientAllergens: [],
+      clientDislikes: [],
+      season: "monsoon",
+    })
+    expect(result).toHaveLength(1)
+  })
+
+  it("all_year always passes regardless of the derived season", () => {
+    const staple = makeFood({ nameEn: "Roti", exchangeType: "cereal", seasons: ["all_year"] })
+    for (const season of ["summer", "monsoon", "winter"] as const) {
+      const result = filterEligibleFoods([staple], {
+        region: "north_indian",
+        dietType: "vegetarian",
+        clientAllergens: [],
+        clientDislikes: [],
+        season,
+      })
+      expect(result, season).toHaveLength(1)
+    }
+  })
+
+  it("omitting season entirely applies no seasonal narrowing at all", () => {
+    const winterCarrot = makeFood({ nameEn: "Carrot", exchangeType: "vegetable_b", seasons: ["winter"] })
+    const result = filterEligibleFoods([winterCarrot], {
+      region: "north_indian",
+      dietType: "vegetarian",
+      clientAllergens: [],
+      clientDislikes: [],
+    })
+    expect(result).toHaveLength(1)
+  })
+
   it("excludes medical-tag foods for the given condition", () => {
     const rawSoyFood = makeFood({ nameEn: "Raw Soy Chunks", exchangeType: "pulse", tags: ["raw_soy"] })
     const result = filterEligibleFoods([rawSoyFood], {

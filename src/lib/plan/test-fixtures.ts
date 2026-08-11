@@ -19,6 +19,7 @@ export function makeFood(overrides: Partial<Food> & { exchangeType: ExchangeCode
     mealSlots: ["breakfast", "mid_morning", "lunch", "evening", "dinner"],
     allergens: [],
     tags: [],
+    seasons: ["all_year"],
     isActive: true,
     notes: null,
     createdAt: new Date("2026-01-01T00:00:00Z"),

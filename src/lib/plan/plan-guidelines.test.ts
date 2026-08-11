@@ -128,6 +128,7 @@ function itemFor(food: ReturnType<typeof makeFood>) {
     carbsG: 0,
     fatG: 0,
     dishFamilyId: food.dishFamilyId,
+    tags: food.tags,
   }
 }
 

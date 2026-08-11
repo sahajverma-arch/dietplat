@@ -35,6 +35,18 @@ export interface FoodSelectorInput {
    * own null-when-disabled/no-data behaviour.
    */
   archetypeAssignmentsByDay?: ArchetypeAssignment[][]
+  /**
+   * Sorted `[dishFamilyIdA, dishFamilyIdB].join("|")` pairs from
+   * vegetable_dish_combinations (Aloo Gobi, Aloo Baingan, Tinda Aloo, Aloo
+   * Methi — see the migrations), computed by route.ts BEFORE food
+   * selection runs. food-selector-fallback.ts uses this to let
+   * vegetable_a/vegetable_b co-occur in one slot only when it forms one of
+   * these real named dishes; otherwise vegetable_b's pool for that slot is
+   * restricted to salad-tagged foods so the two never render as two
+   * separate sabzi lines. Omitted (undefined) degrades to the salad-only
+   * restriction with no curated exception — never throws either way.
+   */
+  curatedVegetableFamilyPairs?: ReadonlySet<string>
 }
 
 export interface SelectedItem {

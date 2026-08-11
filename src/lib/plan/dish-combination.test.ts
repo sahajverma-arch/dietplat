@@ -20,6 +20,7 @@ function makeItem(overrides: Partial<PlanViewItem> & { nameEn: string; exchangeT
     carbsG: 3.5,
     fatG: 0,
     dishFamilyId: null,
+    tags: [],
     ...overrides,
   }
 }

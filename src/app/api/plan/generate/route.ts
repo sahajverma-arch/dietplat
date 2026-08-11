@@ -9,7 +9,7 @@
 
 import { NextResponse } from "next/server"
 import { z } from "zod"
-import { and, eq, gte, inArray } from "drizzle-orm"
+import { and, eq, gte, inArray, isNull, or } from "drizzle-orm"
 
 import { db } from "@/db"
 import {
@@ -26,12 +26,14 @@ import {
   planGenerationRuns,
   roadmapOverrides,
   roadmaps,
+  vegetableDishCombinationMembers,
+  vegetableDishCombinations,
 } from "@/db/schema"
 import type { Answers } from "@/lib/counselling/questions"
 import { weekTargets, type RoadmapResult } from "@/lib/counselling/roadmap"
 import { requireStaffUser } from "@/lib/counselling/require-staff-user"
 import { env } from "@/lib/env"
-import { REGIONS } from "@/lib/foods/vocab"
+import { REGIONS, SEASONS } from "@/lib/foods/vocab"
 import {
   ClientProfileError,
   clientAllergensFromAnswers,
@@ -45,6 +47,7 @@ import { distributeMeals, type MealSlotTemplate } from "@/lib/plan/meal-distribu
 import { selectFoods, type AttemptLog } from "@/lib/plan/food-selector"
 import { checkArchetypeAdherence } from "@/lib/plan/food-selector-validate"
 import type { FoodSelectorInput, PreviousWeekItem } from "@/lib/plan/food-selector-types"
+import { seasonFor } from "@/lib/plan/season"
 import type { ExchangeCode } from "@/lib/plan/table-4-1"
 import {
   ExchangeTypeMismatchError,
@@ -64,6 +67,9 @@ const requestSchema = z.object({
   weekNumber: z.number().int().min(1),
   region: z.enum(REGIONS),
   mealCount: z.number().int().positive().default(5),
+  // Derived from week_start + region (season.ts) when omitted — a
+  // dietitian override, not something the UI needs to ask for by default.
+  season: z.enum(SEASONS).optional(),
 })
 
 function toIsoDate(date: Date): string {
@@ -192,7 +198,7 @@ export async function POST(request: Request) {
   if (!bodyResult.success) {
     return NextResponse.json({ error: "Invalid request body", details: bodyResult.error.flatten() }, { status: 400 })
   }
-  const { roadmapId, weekNumber, region, mealCount } = bodyResult.data
+  const { roadmapId, weekNumber, region, mealCount, season: seasonOverride } = bodyResult.data
 
   const [roadmapRow] = await db.select().from(roadmaps).where(eq(roadmaps.id, roadmapId)).limit(1)
   if (!roadmapRow) {
@@ -209,6 +215,15 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Counselling session for this roadmap not found" }, { status: 404 })
   }
   const { session, client } = sessionRow
+
+  // Moved ahead of eligible-foods (was previously computed just before the
+  // DB transaction, much further down) so the seasonal filter can derive
+  // from the real week_start instead of "now" — the week a plan covers can
+  // start in a different season than the day it's generated on.
+  const anchorDate = session.submittedAt ?? session.createdAt
+  const weekStartDate = addDays(anchorDate, (weekNumber - 1) * 7)
+  const weekEndDate = addDays(weekStartDate, 6)
+  const season = seasonOverride ?? seasonFor(toIsoDate(weekStartDate), region)
 
   const roadmapOutput = roadmapRow.output as RoadmapResult
   const overrides = await db.select().from(roadmapOverrides).where(eq(roadmapOverrides.roadmapId, roadmapId))
@@ -370,11 +385,46 @@ export async function POST(request: Request) {
 
   const allFoods = await db.select().from(foods)
 
+  // Fed into food-selector-fallback.ts so it can let vegetable_a/vegetable_b
+  // co-occur in one slot when it's a real named dish (Aloo Gobi etc.) —
+  // previously this data only ever got loaded at DISPLAY time
+  // (plan-view-model.ts), too late for the selector to use it. Same
+  // sorted-pair convention as pairKey() in food-selector-fallback.ts.
+  const curatedVegetableCombinationRows = await db
+    .select()
+    .from(vegetableDishCombinations)
+    .where(and(eq(vegetableDishCombinations.isActive, true), or(isNull(vegetableDishCombinations.region), eq(vegetableDishCombinations.region, region))))
+  const curatedVegetableFamilyPairs = new Set<string>()
+  if (curatedVegetableCombinationRows.length > 0) {
+    const memberRows = await db
+      .select()
+      .from(vegetableDishCombinationMembers)
+      .where(
+        inArray(
+          vegetableDishCombinationMembers.vegetableDishCombinationId,
+          curatedVegetableCombinationRows.map((c) => c.id)
+        )
+      )
+    const familiesByCombo = new Map<string, string[]>()
+    for (const m of memberRows) {
+      const list = familiesByCombo.get(m.vegetableDishCombinationId) ?? []
+      list.push(m.dishFamilyId)
+      familiesByCombo.set(m.vegetableDishCombinationId, list)
+    }
+    for (const combo of curatedVegetableCombinationRows) {
+      const families = familiesByCombo.get(combo.id) ?? []
+      // Only a genuine vegetable_a + vegetable_b PAIR is relevant here —
+      // composeMealDisplay() always resolves each type to exactly one food
+      // per slot, so a cross-type co-occurrence is always exactly 2 items.
+      if (families.length === 2) curatedVegetableFamilyPairs.add([...families].sort().join("|"))
+    }
+  }
+
   let eligibleFoodsBySlot
   try {
     eligibleFoodsBySlot = eligibleFoodsForSkeleton(
       allFoods,
-      { region, dietType, clientAllergens, clientDislikes },
+      { region, dietType, clientAllergens, clientDislikes, season },
       neededSlotsByExchangeType,
       dishFamilyConstraints
     )
@@ -397,6 +447,7 @@ export async function POST(request: Request) {
     dayIndexOffset,
     previousWeekLastDay,
     archetypeAssignmentsByDay,
+    curatedVegetableFamilyPairs,
   }
 
   const attempts: AttemptLog[] = []
@@ -407,11 +458,7 @@ export async function POST(request: Request) {
   // (LLM or fallback), attached below to the LAST logged attempt purely
   // for observability; nutrition validation (assertWithinTolerance,
   // further down) is entirely separate and unaffected by this.
-  const archetypeAdherence = checkArchetypeAdherence(
-    selectionResult.selection,
-    archetypeAssignmentsByDay,
-    foodSelectorInput
-  )
+  const archetypeAdherence = checkArchetypeAdherence(selectionResult.selection, archetypeAssignmentsByDay, foodSelectorInput)
 
   // Persisted immediately — independent of whether the rest of generation
   // succeeds, so a failure downstream (deviation check, DB write) never
@@ -463,10 +510,6 @@ export async function POST(request: Request) {
     throw err
   }
 
-  const anchorDate = session.submittedAt ?? session.createdAt
-  const weekStartDate = addDays(anchorDate, (weekNumber - 1) * 7)
-  const weekEndDate = addDays(weekStartDate, 6)
-
   const dietPlanId = await db.transaction(async (tx) => {
     const [plan] = await tx
       .insert(dietPlans)
@@ -502,7 +545,13 @@ export async function POST(request: Request) {
         })
         .returning({ id: dietPlanDays.id })
 
-      for (const [slotOrder, meal] of day.meals.entries()) {
+      for (const meal of day.meals) {
+        // Real display order, looked up by slot name from the meal
+        // templates rather than trusted from the meal's position in
+        // day.meals — that array's order matches slot_order only
+        // incidentally (it falls out of Object.entries(skeleton) at
+        // generation time), so this is the authoritative source regardless.
+        const slotOrder = templates.find((t) => t.slot === meal.slot)?.slotOrder ?? 0
         // Observability only (Meal Archetype layer) — never read by
         // nutrition math. null whenever no archetype applied, which is
         // exactly what every diet_plan_meals row looked like before this
@@ -541,6 +590,7 @@ export async function POST(request: Request) {
       generationMode: selectionResult.generationMode,
       modelUsed: selectionResult.modelUsed,
       attempts: selectionResult.attempts,
+      season,
       weekStart: toIsoDate(weekStartDate),
       weekEnd: toIsoDate(weekEndDate),
       achieved: priced.days[0].achieved,

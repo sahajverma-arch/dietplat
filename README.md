@@ -51,14 +51,15 @@ If you're about to write a prompt that asks a model to "calculate calories" or "
 ┌─────────────────────────────────────────────────────────────────────┐
 │  Meal distributor — pure                                            │
 │  src/lib/plan/meal-distributor.ts                                   │
-│  splits counts across meal-template slots by kcal_share             │
+│  splits counts across meal-template slots by kcal_share —           │
+│  meat/meat_lean/milk_cow/milk_skim: whole day, one slot              │
 └──────────────────────────────┬──────────────────────────────────────┘
                                 │ Skeleton (per-slot exchange needs)
                                 ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │  Eligible-foods filter — pure                                       │
 │  src/lib/plan/eligible-foods.ts                                     │
-│  region / diet type / allergens / dislikes / medical tags           │
+│  region / diet type / allergens / dislikes / medical tags / season  │
 └──────────────────────────────┬──────────────────────────────────────┘
                                 │ pre-filtered candidates only
                                 ▼
@@ -125,7 +126,7 @@ Every function in `src/lib/counselling/` and `src/lib/plan/` has a Vitest unit t
 
 ## How to add a region
 
-Only `north_indian` and `maharashtrian` are seeded today. To add another (e.g. `south_indian`, already listed in `src/lib/foods/vocab.ts`'s `REGIONS`):
+All 8 `REGIONS` (`src/lib/foods/vocab.ts`) have real seeded food + meal-template data today. To add a new one:
 
 1. Add a migration inserting 5 `meal_templates` rows for the region (`breakfast`/`mid_morning`/`lunch`/`evening`/`dinner`, `meal_count = 5`) — copy the shape from `supabase/migrations/20260808200000_classic_table41_exchange_system.sql`'s existing rows, adjusting `time_hint`/`kcal_share`/`allowed_exchange_types` if the region's meal pattern differs.
 2. Add food rows to `src/db/seed-data/table41_foods.json` tagged with the new region in `regions: [...]` (or add the region to an existing `"generic"` food if it applies everywhere), then run `npm run seed:foods` (idempotent — safe to re-run).
@@ -140,6 +141,7 @@ Either through the `/foods` admin page (`src/app/(app)/foods/`) or by adding a r
 - `servingRawG` + `exchangeUnits` — grams per `exchangeUnits` exchanges of that type. `servingRawG` is nullable **only** for `fruit` (Table 4.1 defines fruit's raw amount as variable; `householdMeasure` carries the real portion instead).
 - `regions`, `dietTypes`, `mealSlots` — arrays; a food needs `"generic"` in `regions` to be eligible everywhere, and must list every slot it can appear in (a meal template allowing an exchange type at a slot is not enough — the food itself must also allow that slot, checked in `eligible-foods.ts`).
 - `allergens` — must match `src/lib/foods/vocab.ts`'s `ALLERGENS` vocabulary to be excludable by intake-answer allergies (see `src/lib/plan/client-profile-from-answers.ts`'s slug mapping).
+- `seasons` — optional, defaults to `["all_year"]`. Only tag a food with `summer`/`monsoon`/`winter` when you have an actual claim behind it (a real dietitian source, not a guess) — see CLAUDE.md "Seasonal eligibility". Most foods should stay untagged.
 
 Region-specific display names for the same exchange (Roti/Poli, Ghee/Toop, etc.) are separate alias rows with identical exchange arithmetic, not a translation layer — see CLAUDE.md "The exchange system".
 

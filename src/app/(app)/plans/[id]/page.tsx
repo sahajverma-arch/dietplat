@@ -144,6 +144,7 @@ export default async function PlanPage({ params }: { params: Promise<{ id: strin
                       dishCombinations={dishCombinations}
                       vegetableDishCombinations={vegetableDishCombinations}
                       vegetableDishCombinationMembers={vegetableDishCombinationMembers}
+                      rotationDay={day.dayIndex + (plan.weekNumber - 1) * 7}
                     />
                   </TableCell>
                   <TableCell className="text-right align-top">{formatKcal(meal.totals.kcal)}</TableCell>

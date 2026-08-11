@@ -4,6 +4,7 @@
  */
 
 import type { Food } from "@/db/schema"
+import type { Season } from "@/lib/foods/vocab"
 import type { ExchangeCode } from "./table-4-1"
 
 export interface EligibilityCriteria {
@@ -13,6 +14,14 @@ export interface EligibilityCriteria {
   clientDislikes: string[]
   /** e.g. ["hypothyroid", "pcos"] — see MEDICAL_TAG_RULES below. */
   medicalTags?: string[]
+  /**
+   * From season.ts's seasonFor(weekStart, region) — omitted means no
+   * seasonal narrowing at all (every food passes), matching medicalTags'
+   * opt-in shape above. Real callers (POST /api/plan/generate) always
+   * compute and pass this; tests that don't care about seasonality can
+   * freely omit it.
+   */
+  season?: Season
 }
 
 /**
@@ -57,6 +66,13 @@ function buildSteps(criteria: EligibilityCriteria): FilterStep[] {
     {
       name: "medical_tags",
       keep: (f) => excludedMedicalTags.size === 0 || !f.tags.some((t) => excludedMedicalTags.has(t)),
+    },
+    {
+      // "all_year" always passes regardless of the derived season — a
+      // staple never gets filtered out by seasonality alone, and an
+      // untagged food (default seasons: ["all_year"]) is unaffected.
+      name: "seasons",
+      keep: (f) => !criteria.season || f.seasons.includes(criteria.season) || f.seasons.includes("all_year"),
     },
   ]
 }

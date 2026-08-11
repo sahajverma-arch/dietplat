@@ -112,6 +112,11 @@ export const foods = pgTable("foods", {
   mealSlots: text("meal_slots").array().notNull().default([]),
   allergens: text("allergens").array().notNull().default([]),
   tags: text("tags").array().notNull().default([]),
+  // One or more of SEASONS (src/lib/foods/vocab.ts) — "all_year" always
+  // passes the eligibility filter regardless of what else is listed (see
+  // eligible-foods.ts), so an untagged/staple food is never accidentally
+  // narrowed. See CLAUDE.md "The exchange system".
+  seasons: text("seasons").array().notNull().default(["all_year"]),
   isActive: boolean("is_active").notNull().default(true),
   notes: text("notes"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

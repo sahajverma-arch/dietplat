@@ -18,6 +18,7 @@ function makeItem(overrides: Partial<PlanViewItem> & { nameEn: string; exchangeT
     carbsG: 3.5,
     fatG: 0,
     dishFamilyId: null,
+    tags: [],
     ...overrides,
   }
 }
@@ -33,11 +34,7 @@ describe("composeMealDisplay — the exact examples from the spec", () => {
     const groups = composeMealDisplay([rajma, mattaRice, cabbage, cauliflower, potato], "north_indian")
     const labels = groups.map(formatComposedGroupPlainText)
 
-    expect(labels).toEqual([
-      "Rajma Curry (15 g)",
-      "Matta Rice (60 g)",
-      "Mixed Vegetable Sabzi (Cabbage 100 g, Cauliflower 100 g, Potato 75 g)",
-    ])
+    expect(labels).toEqual(["Rajma Curry (15 g)", "Matta Rice (60 g)", "Mixed Vegetable Sabzi (275 g)"])
   })
 
   it("Kala Chana + Capsicum + Ash Gourd + Yam + Roti -> Kala Chana Curry / Mixed Vegetable Sabzi (...) / Roti", () => {
@@ -53,7 +50,8 @@ describe("composeMealDisplay — the exact examples from the spec", () => {
       "Mixed Vegetable Sabzi",
       formatComposedGroupPlainText(groups[2]),
     ])
-    expect(formatComposedGroupPlainText(groups[1])).toBe("Mixed Vegetable Sabzi (Capsicum 100 g, Ash Gourd 100 g, Yam 75 g)")
+    // Generic "Mixed Vegetable" label: total grams only, no per-vegetable breakdown (see GENERIC_MIXED_VEG_PREFIX).
+    expect(formatComposedGroupPlainText(groups[1])).toBe("Mixed Vegetable Sabzi (275 g)")
   })
 
   it("Moong Dal + Drumstick + Bitter Gourd + Potato + Matta Rice -> Moong Dal Curry / Mixed Vegetable Sabzi (...) / Matta Rice", () => {
@@ -65,7 +63,7 @@ describe("composeMealDisplay — the exact examples from the spec", () => {
 
     const groups = composeMealDisplay([moongDal, drumstick, bitterGourd, potato, mattaRice], "north_indian")
     expect(formatComposedGroupPlainText(groups[0])).toBe("Moong Dal Curry (15 g)")
-    expect(formatComposedGroupPlainText(groups[1])).toBe("Mixed Vegetable Sabzi (Drumstick 100 g, Bitter Gourd 100 g, Potato 75 g)")
+    expect(formatComposedGroupPlainText(groups[1])).toBe("Mixed Vegetable Sabzi (275 g)")
     expect(formatComposedGroupPlainText(groups[2])).toBe("Matta Rice (60 g)")
   })
 })
@@ -150,7 +148,7 @@ describe("composeMealDisplay — items unaffected by composition pass through un
       "Roti (60 g)",
       "Orange (1 medium)",
       "Ghee (8 g)",
-      "Egg (40 g)",
+      "Egg (1, 40 g)",
     ])
   })
 
@@ -209,6 +207,59 @@ describe("composeMealDisplay — traceability and nutrition integrity", () => {
   })
 })
 
+describe("composeMealDisplay — salad-tagged vegetables are kept out of the cooked sabzi pool", () => {
+  it("the reported case: Beetroot no longer gets lumped into Capsicum/Tomato/Onion/Potato", () => {
+    const capsicum = makeItem({ nameEn: "Capsicum", exchangeType: "vegetable_a" })
+    const tomato = makeItem({ nameEn: "Tomato", exchangeType: "vegetable_a" })
+    const onion = makeItem({ nameEn: "Onion", exchangeType: "vegetable_b", tags: ["salad"] })
+    const potato = makeItem({ nameEn: "Potato", exchangeType: "vegetable_b" })
+    const beetroot = makeItem({ nameEn: "Beetroot", exchangeType: "vegetable_b", tags: ["requires_cooking", "salad"] })
+
+    const groups = composeMealDisplay([capsicum, tomato, onion, potato, beetroot], "punjabi")
+    const labels = groups.map((g) => g.dishName)
+
+    expect(labels).toEqual(["Mixed Vegetable Sabzi", "Salad"])
+    expect(groups[0].items.map((i) => i.nameEn)).toEqual(["Capsicum", "Tomato", "Potato"])
+    expect(groups[1].items.map((i) => i.nameEn)).toEqual(["Onion", "Beetroot"])
+  })
+
+  it("a single salad item becomes '{Name} Salad', not '{Name} Sabzi'", () => {
+    const cucumber = makeItem({ nameEn: "Cucumber", exchangeType: "vegetable_a", tags: ["salad"] })
+    const groups = composeMealDisplay([cucumber], "punjabi")
+    expect(groups).toEqual([{ kind: "single_dish", dishName: "Cucumber Salad", items: [cucumber] }])
+  })
+
+  it("multiple salad items become one 'Salad (...)' mixed_dish, not 'Mixed Vegetable Sabzi'", () => {
+    const cucumber = makeItem({ nameEn: "Cucumber", exchangeType: "vegetable_a", tags: ["salad"], servingRawG: 100 })
+    const onion = makeItem({ nameEn: "Onion", exchangeType: "vegetable_b", tags: ["salad"], servingRawG: 50 })
+    const groups = composeMealDisplay([cucumber, onion], "punjabi")
+    expect(groups).toEqual([{ kind: "mixed_dish", dishName: "Salad", items: [cucumber, onion] }])
+    expect(formatComposedGroupPlainText(groups[0])).toBe("Salad (Cucumber 100 g, Onion 50 g)")
+  })
+
+  it("a day with only salad vegetables (no cooked ones) emits just the salad group", () => {
+    const beetroot = makeItem({ nameEn: "Beetroot", exchangeType: "vegetable_b", tags: ["salad"] })
+    const groups = composeMealDisplay([beetroot], "punjabi")
+    expect(groups).toEqual([{ kind: "single_dish", dishName: "Beetroot Salad", items: [beetroot] }])
+  })
+
+  it("a day with only cooked vegetables (no salad ones) is unaffected — same as before this change", () => {
+    const capsicum = makeItem({ nameEn: "Capsicum", exchangeType: "vegetable_a" })
+    const potato = makeItem({ nameEn: "Potato", exchangeType: "vegetable_b" })
+    const groups = composeMealDisplay([capsicum, potato], "punjabi")
+    expect(groups).toEqual([{ kind: "mixed_dish", dishName: "Mixed Vegetable Sabzi", items: [capsicum, potato] }])
+  })
+
+  it("salad items never merge with pulse or other exchange types", () => {
+    const dal = makeItem({ nameEn: "Moong Dal", exchangeType: "pulse" })
+    const cucumber = makeItem({ nameEn: "Cucumber", exchangeType: "vegetable_a", tags: ["salad"] })
+    const groups = composeMealDisplay([dal, cucumber], "punjabi")
+    expect(groups).toHaveLength(2)
+    expect(groups[0].dishName).toBe("Moong Dal Curry")
+    expect(groups[1].dishName).toBe("Cucumber Salad")
+  })
+})
+
 describe("composeMealDisplay — order preservation", () => {
   it("emits each group at the position of the first item it consumes, preserving original left-to-right order", () => {
     const milk = makeItem({ nameEn: "Milk", exchangeType: "milk_cow" })
@@ -221,5 +272,28 @@ describe("composeMealDisplay — order preservation", () => {
     const groups = composeMealDisplay([milk, cabbage, rajma, potato, roti], "north_indian")
     const kinds = groups.map((g) => g.dishName ?? g.items[0].nameEn)
     expect(kinds).toEqual(["Milk", "Mixed Vegetable Sabzi", "Rajma Curry", "Roti"])
+  })
+})
+
+describe("formatComposedGroupPlainText — generic 'Mixed Vegetable' shows total grams only, no per-vegetable breakdown", () => {
+  it("collapses a generic Mixed Vegetable Sabzi group to '{dishName} ({totalGrams} g)'", () => {
+    const capsicum = makeItem({ nameEn: "Capsicum", exchangeType: "vegetable_a", servingRawG: 100 })
+    const tomato = makeItem({ nameEn: "Tomato", exchangeType: "vegetable_a", servingRawG: 100 })
+    const group = { kind: "mixed_dish" as const, dishName: "Mixed Vegetable Sabzi", items: [capsicum, tomato] }
+    expect(formatComposedGroupPlainText(group)).toBe("Mixed Vegetable Sabzi (200 g)")
+  })
+
+  it("still shows the per-vegetable breakdown for a curated named combo (e.g. Aloo Gobi) — only the generic label collapses", () => {
+    const potato = makeItem({ nameEn: "Potato", exchangeType: "vegetable_b", servingRawG: 75 })
+    const gobi = makeItem({ nameEn: "Gobi", exchangeType: "vegetable_a", servingRawG: 100 })
+    const group = { kind: "mixed_dish" as const, dishName: "Aloo Gobi", items: [potato, gobi] }
+    expect(formatComposedGroupPlainText(group)).toBe("Aloo Gobi (Potato 75 g, Gobi 100 g)")
+  })
+
+  it("regional 'Mixed Vegetable {word}' labels (Bhaji, Thoran) also collapse — the rule is prefix-based, not English-only", () => {
+    const cabbage = makeItem({ nameEn: "Cabbage", exchangeType: "vegetable_a", servingRawG: 100 })
+    const cauliflower = makeItem({ nameEn: "Cauliflower", exchangeType: "vegetable_a", servingRawG: 100 })
+    const group = { kind: "mixed_dish" as const, dishName: "Mixed Vegetable Bhaji", items: [cabbage, cauliflower] }
+    expect(formatComposedGroupPlainText(group)).toBe("Mixed Vegetable Bhaji (200 g)")
   })
 })

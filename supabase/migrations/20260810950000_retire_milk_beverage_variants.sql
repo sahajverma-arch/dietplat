@@ -1,0 +1,27 @@
+-- LEANR: retire "Milk Coffee" and "Masala Chai" (added in
+-- 20260810300000_milk_beverage_variety.sql as milk_cow rotation
+-- alternatives to plain Milk, since milk_cow had exactly one food
+-- system-wide and was structurally repeated with zero variation).
+--
+-- A dietitian directive overrides that fix: a formally prescribed milk_cow
+-- exchange should be plain milk, full stop — not a coffee or tea
+-- preparation. This isn't a macro concern (both foods carried the same
+-- milk_cow exchange, 250 ml/1 exchange, exactly matching plain Milk's
+-- ratio — see the original migration's own comment on why); it's that a
+-- diet plan shouldn't formally catalogue "Milk Coffee" or "Masala Chai" as
+-- its own line item at all. A client can add their own coffee/tea to a
+-- glass of milk however they like; the plan's job is to specify the milk
+-- exchange, not the beverage preparation.
+--
+-- Deactivating (not deleting) — foods.is_active is the established
+-- retirement mechanism throughout this schema (see
+-- 20260810910000_retire_paneer_paratha.sql), so any already-generated plan
+-- that used these two foods keeps its history intact; only future
+-- generations are affected, via eligible-foods.ts's existing is_active
+-- filter — no code change needed.
+--
+-- Plain "Milk" itself is untouched and remains the only milk_cow food at
+-- breakfast/mid_morning/evening — the rotation-variety problem the retired
+-- migration was solving is now considered secondary to this directive.
+
+update public.foods set is_active = false where name_en in ('Milk Coffee', 'Masala Chai');

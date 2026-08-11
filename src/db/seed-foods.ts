@@ -24,6 +24,8 @@ interface SourceFood {
   mealSlots: string[]
   allergens?: string[]
   tags?: string[]
+  /** Defaults to ["all_year"] when omitted — see SEASONS in src/lib/foods/vocab.ts. */
+  seasons?: string[]
   notes?: string
 }
 
@@ -47,6 +49,7 @@ async function main() {
       mealSlots: f.mealSlots,
       allergens: f.allergens ?? [],
       tags: f.tags ?? [],
+      seasons: f.seasons ?? ["all_year"],
       notes: f.notes || null,
     }
     if (existing.length > 0) {
@@ -67,6 +70,7 @@ async function main() {
           mealSlots: values.mealSlots,
           allergens: values.allergens,
           tags: values.tags,
+          seasons: values.seasons,
           notes: values.notes,
         })
         .where(eq(foods.id, (existing[0] as { id: string }).id))

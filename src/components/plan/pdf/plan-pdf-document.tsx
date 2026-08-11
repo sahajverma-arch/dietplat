@@ -12,6 +12,7 @@ import { formatBmi, formatGrams, formatKcal, formatWeight } from "@/lib/format"
 import { combineDishGroups } from "@/lib/plan/dish-combination"
 import { composeMealDisplay, formatComposedGroupPlainText } from "@/lib/plan/meal-composition"
 import { applyVegetableDishNames } from "@/lib/plan/vegetable-dish-naming"
+import { isMixedVegDay } from "@/lib/plan/mixed-veg-day"
 import type { PlanViewModel } from "@/lib/plan/plan-view-model"
 import { planDateRangeLabel } from "@/lib/plan/plan-view-model"
 
@@ -196,7 +197,8 @@ export function PlanPdfDocument({ model }: { model: PlanViewModel }) {
                       ),
                       model.vegetableDishCombinations,
                       model.vegetableDishCombinationMembers,
-                      model.plan.region
+                      model.plan.region,
+                      isMixedVegDay(day.dayIndex + (plan.weekNumber - 1) * 7)
                     )
                       .map(formatComposedGroupPlainText)
                       .join(", ")}

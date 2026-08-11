@@ -35,6 +35,14 @@ export const MEAL_SLOTS = ["breakfast", "mid_morning", "lunch", "evening", "dinn
 
 export const ALLERGENS = ["peanut", "tree_nut", "dairy", "gluten", "soy", "egg", "fish", "shellfish"] as const
 
+// Four buckets, deliberately not finer — India's diet-relevant seasonal
+// shift doesn't need more granularity than this for eligibility purposes.
+// "all_year" always passes the eligibility filter regardless of the
+// calendar (see eligible-foods.ts) — it's the default every food gets
+// unless explicitly retagged.
+export const SEASONS = ["summer", "monsoon", "winter", "all_year"] as const
+export type Season = (typeof SEASONS)[number]
+
 export const TAGS = [
   "high_fibre",
   "low_gi",
@@ -42,4 +50,20 @@ export const TAGS = [
   "travel_friendly",
   "pcos_friendly",
   "thyroid_caution",
+  // Raw/salad-style vegetable, kept out of the cooked "Mixed Vegetable
+  // Sabzi" pool at display time — see meal-composition.ts. A food's
+  // existing `seasons` tag already governs WHEN it's eligible at all, so a
+  // winter-only food tagged salad (e.g. Radish, Carrot) is only ever
+  // treated as a salad item during the season it can appear in — no
+  // separate season-conditional salad logic needed.
+  "salad",
+  // Gourd-family vegetables (Karela, Lauki, Brinjal, Tori and their
+  // regional aliases) that are always their own single dish in real
+  // cooking — Karela Sabzi, Lauki Sabzi, Baingan Bharta — never randomly
+  // combined with an unrelated vegetable into a "mixed veg". Excluded from
+  // the "mixed veg" combo pool in food-selector-fallback.ts; still free to
+  // appear on its own, at whatever count the day needs, and still free to
+  // pair with vegetable_b (e.g. Aloo Baingan) since that's a different,
+  // curated-name mechanism, not the "mixed veg" pool this tag guards.
+  "solo_only",
 ] as const

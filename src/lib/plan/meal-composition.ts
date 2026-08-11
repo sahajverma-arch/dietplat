@@ -18,6 +18,19 @@ import type { ExchangeCode } from "./table-4-1"
 const VEGETABLE_EXCHANGE_TYPES: ExchangeCode[] = ["vegetable_a", "vegetable_b"]
 
 /**
+ * "salad"-tagged vegetables (Cucumber, Onion, Beetroot, Radish, Carrot —
+ * see table41_foods.json) are kept in a SEPARATE group from everything
+ * else pooled into the cooked "Mixed Vegetable {RegionWord}" dish, instead
+ * of being merged in regardless of culinary fit (e.g. Beetroot landing in
+ * the same "sabzi" as Capsicum/Tomato/Potato — see the conversation this
+ * accompanies). A food's own `seasons` tag already governs when it's
+ * eligible at all, so a winter-only salad food (Radish, Carrot) is only
+ * ever grouped as salad during the season it can appear in — no separate
+ * season-conditional logic needed here.
+ */
+const SALAD_TAG = "salad"
+
+/**
  * Region -> the local word for a vegetable stir-fry/side dish.
  *
  * "Bhaji" for maharashtrian is a VERIFIED fact from this project's own
@@ -72,10 +85,13 @@ export interface ComposedGroup {
  *   naming falls out for free from the underlying food's own nameEn —
  *   e.g. a south_indian pulse food is already named "Parippu", so this
  *   produces "Parippu Curry" with no region-specific word list needed.)
- * - vegetable_a + vegetable_b items are pooled together: 0 -> nothing
- *   emitted for that pool, 1 -> "{Food Name} {RegionWord}" single_dish,
- *   2+ -> one "Mixed Vegetable {RegionWord}" mixed_dish holding all of
- *   them together.
+ * - vegetable_a + vegetable_b items are split into two pools by the
+ *   "salad" tag (see SALAD_TAG above), each pooled independently: 0 ->
+ *   nothing emitted, 1 -> "{Food Name} {RegionWord}"/"{Food Name} Salad"
+ *   single_dish, 2+ -> "Mixed Vegetable {RegionWord}"/"Salad" mixed_dish.
+ *   The non-salad pool is emitted at the position of its first item, then
+ *   the salad pool at the position of ITS first item — so day-to-day item
+ *   order still drives which appears first in a meal's read order.
  * - Every other exchange type (cereal, milk_cow, milk_skim, meat,
  *   meat_lean, fruit, fat, sugar) passes through unchanged, one "plain"
  *   group per item.
@@ -84,22 +100,39 @@ export interface ComposedGroup {
  * group is emitted at the position of the first item it consumes, and
  * later items already absorbed into an earlier group are skipped.
  */
+function composeVegetablePool(pool: PlanViewItem[], singularWord: string, pluralName: string): ComposedGroup | null {
+  if (pool.length === 0) return null
+  if (pool.length === 1) return { kind: "single_dish", dishName: `${pool[0].nameEn} ${singularWord}`, items: pool }
+  return { kind: "mixed_dish", dishName: pluralName, items: pool }
+}
+
 export function composeMealDisplay(items: PlanViewItem[], region: string): ComposedGroup[] {
   const vegetables = items.filter((i) => VEGETABLE_EXCHANGE_TYPES.includes(i.exchangeType))
-  const vegetableIds = new Set(vegetables.map((i) => i.id))
+  const saladVegetables = vegetables.filter((i) => i.tags.includes(SALAD_TAG))
+  const sabziVegetables = vegetables.filter((i) => !i.tags.includes(SALAD_TAG))
+  const saladIds = new Set(saladVegetables.map((i) => i.id))
+  const sabziIds = new Set(sabziVegetables.map((i) => i.id))
   const dishWord = vegetableDishWord(region)
 
   const groups: ComposedGroup[] = []
-  let vegetableGroupEmitted = false
+  let sabziEmitted = false
+  let saladEmitted = false
 
   for (const item of items) {
-    if (vegetableIds.has(item.id)) {
-      if (vegetableGroupEmitted) continue
-      vegetableGroupEmitted = true
-      if (vegetables.length === 1) {
-        groups.push({ kind: "single_dish", dishName: `${vegetables[0].nameEn} ${dishWord}`, items: vegetables })
-      } else {
-        groups.push({ kind: "mixed_dish", dishName: `Mixed Vegetable ${dishWord}`, items: vegetables })
+    if (sabziIds.has(item.id)) {
+      if (!sabziEmitted) {
+        sabziEmitted = true
+        const group = composeVegetablePool(sabziVegetables, dishWord, `Mixed Vegetable ${dishWord}`)
+        if (group) groups.push(group)
+      }
+      continue
+    }
+
+    if (saladIds.has(item.id)) {
+      if (!saladEmitted) {
+        saladEmitted = true
+        const group = composeVegetablePool(saladVegetables, "Salad", "Salad")
+        if (group) groups.push(group)
       }
       continue
     }
@@ -115,9 +148,29 @@ export function composeMealDisplay(items: PlanViewItem[], region: string): Compo
   return groups
 }
 
-/** Plain-text rendering of one composed group — used by the PDF (no interactivity) and anywhere else a flat string is needed. Quantities are always shown: grouping is a display-name change, not a reason to hide clinically relevant portions. */
+/**
+ * The generic, un-curated "Mixed Vegetable {RegionWord}" label specifically
+ * — as opposed to a curated named combo like "Aloo Gobi" or "Avial" that
+ * vegetable-dish-naming.ts renames a mixed_dish group to when the exact
+ * vegetable set matches a seeded combination. Only this generic case is
+ * what a dietitian/client would actually call "mix veg" — the thing the
+ * user explicitly asked to stop reading as an ingredient list (see the
+ * conversation this accompanies): a curated combo already names its own
+ * two components (Aloo Gobi IS potato+cauliflower, by definition), so
+ * listing them stays useful there; the generic pool is an arbitrary
+ * same-exchange-type grouping where the breakdown reads as clutter instead.
+ */
+export const GENERIC_MIXED_VEG_PREFIX = "Mixed Vegetable "
+
+/** Plain-text rendering of one composed group — used by the PDF (no interactivity) and anywhere else a flat string is needed. Quantities are always shown: grouping is a display-name change, not a reason to hide clinically relevant portions — except the generic "Mixed Vegetable {word}" case, where the user explicitly asked for just the dish name and total grams, no per-vegetable breakdown (see GENERIC_MIXED_VEG_PREFIX above). */
 export function formatComposedGroupPlainText(group: ComposedGroup): string {
   if (group.kind === "plain") return formatItemLabel(group.items[0])
   if (group.kind === "single_dish") return `${group.dishName} (${formatItemQuantity(group.items[0])})`
+
+  if (group.dishName?.startsWith(GENERIC_MIXED_VEG_PREFIX)) {
+    const totalGrams = group.items.reduce((sum, i) => sum + (i.servingRawG ?? 0), 0)
+    return `${group.dishName} (${Math.round(totalGrams)} g)`
+  }
+
   return `${group.dishName} (${group.items.map((i) => `${i.nameEn} ${formatItemQuantity(i)}`).join(", ")})`
 }

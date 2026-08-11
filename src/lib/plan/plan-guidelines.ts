@@ -57,6 +57,8 @@ export interface PlanViewItem {
   fatG: number
   /** Dish Composition Layer input — see dish-combination.ts / meal-composition.ts. Never read by any nutrition calculation. */
   dishFamilyId: string | null
+  /** Straight from foods.tags — meal-composition.ts reads the "salad" tag to keep raw/salad vegetables out of the cooked "Mixed Vegetable Sabzi" pool. Never read by any nutrition calculation. */
+  tags: string[]
 }
 
 export interface PlanViewMeal {

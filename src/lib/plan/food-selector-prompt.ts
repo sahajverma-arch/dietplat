@@ -22,9 +22,17 @@ export const ROTATION_RULES = [
   "Do not repeat the same cereal item in the same slot on consecutive days.",
   "The same pulse (dal) food must not be used on more than 2 days in the week.",
   "When a single day has fruit exchanges in more than one slot, use a different fruit in each slot.",
-  "When a slot needs 2 or more vegetable_a exchanges, split them across 2 different vegetable_a foods " +
-    "instead of repeating one — this applies especially at dinner.",
+  "vegetable_a and vegetable_b: always use ONE food per slot, even at a high exchange count — real everyday " +
+    "sabzi is single-vegetable, not an arbitrary mix, and a meal must never carry two separate cooked-vegetable " +
+    "dishes. Never split a vegetable_a or vegetable_b slot across multiple foods of the same exchangeType.",
+  "When a slot needs BOTH vegetable_a and vegetable_b, they may only appear together as ONE recognisable named " +
+    "Indian dish (e.g. Aloo Gobi = potato + cauliflower, Aloo Baingan = potato + brinjal) — never an arbitrary " +
+    "pairing. If the two foods you'd otherwise pick don't form such a dish, choose a vegetable_b food tagged " +
+    "\"salad\" instead (it renders as a separate salad, not a competing sabzi).",
   "When a slot needs 2 or more fruit exchanges, split them across 2 different fruit foods instead of repeating one.",
+  "If a slot's cereal is a plain porridge (tagged \"no_cooking_fat\", e.g. Oats) rather than a fried/tempered dish " +
+    "like a paratha, do not choose a cooking fat (tagged \"cooking_fat\" — ghee, oil) for that slot's fat exchange. " +
+    "Pick a non-cooking-fat option instead (e.g. a nut like almonds or walnut) if one is in the eligible list.",
   "Prefer variety across the 7 days over repeating the same food — rotate through the eligible list.",
 ]
 

@@ -25,14 +25,18 @@ describe("solveExchanges — real plan reproduction (Deepak Sharma, maintenance)
     expectWithinTolerance(result)
   })
 
-  it("lands close to the real decoded skeleton (18 cereal, 2 milk_cow, 2 pulse, 3 veg_a, 2 veg_b, 6 fruit, 11 fat)", () => {
+  it("lands close to the real decoded skeleton (18 cereal, 1 milk_cow, 2 pulse, 3 veg_a, 2 veg_b, 6 fruit, 11 fat)", () => {
     if (!result.ok) throw new Error("solver failed")
     // Not an exact match requirement (the solver explores its own search
     // space independently) — but should be in the same neighbourhood as
-    // what actually shipped, since it targets the same numbers.
+    // what actually shipped, since it targets the same numbers. milk_cow is
+    // 1 here, not the real plan's 2: MILK_COW_CAP now fixes it at 1 exchange
+    // (250 ml) for every diet type — a dietitian directive, confirmed after
+    // this change — with the solver's existing fat/pulse/fruit flexibility
+    // (not milk_skim, for this particular target) absorbing the difference.
     expect(result.exchangeCounts.cereal).toBeGreaterThan(14)
     expect(result.exchangeCounts.cereal).toBeLessThan(22)
-    expect(result.exchangeCounts.milk_cow).toBe(2)
+    expect(result.exchangeCounts.milk_cow).toBe(1)
     expect(result.exchangeCounts.meat).toBe(0)
     expect(result.exchangeCounts.meat_lean).toBe(0)
     expect(result.exchangeCounts.vegetable_a).toBeGreaterThanOrEqual(4)
@@ -96,6 +100,51 @@ describe("solveExchanges — diet type behaviour", () => {
     expect(counts.meat_lean).toBe(0)
   })
 
+  it("eggetarian prefers 2 eggs (meat = 2) on a comfortably achievable target, never zero", () => {
+    const counts = countsOf(solveExchanges({ ...base, dietType: "eggetarian" }))
+    expect(counts.meat).toBe(2)
+    expect(counts.meat_lean).toBe(0)
+  })
+
+  it("non_vegetarian always carries at least one egg or lean-meat/fish exchange", () => {
+    const counts = countsOf(solveExchanges({ ...base, dietType: "non_vegetarian" }))
+    expect(counts.meat + counts.meat_lean).toBeGreaterThanOrEqual(1)
+  })
+
+  it("non_vegetarian prefers 2 real meat_lean exchanges (chicken/fish, ~70 g) when the target allows it", () => {
+    // Distinct from eggetarian: a client tagged non-vegetarian rather than
+    // eggetarian expects actual meat, not just eggs — eggetarian already
+    // exists as its own diet type for egg-only clients. Rahul (TEST-002)'s
+    // real target, not `base`: `base` happens to land exactly on a Table
+    // 4.1 fat-grid gap for the meat_lean=2 tier (verified while building
+    // this) and falls back — see the fallback test below for that case.
+    const result = solveExchanges({ kcal: 2339, proteinG: 108, fatG: 58, carbsG: 346, fibreG: 31, dietType: "non_vegetarian" })
+    expect(result.ok, JSON.stringify(result)).toBe(true)
+    if (!result.ok) return
+    expect(result.exchangeCounts.meat_lean).toBe(2)
+  })
+
+  it("non_vegetarian falls back off the 2-meat_lean floor when it can't fit tolerance", () => {
+    // Verified target: forcing meat_lean=2 alone overshoots protein by
+    // ~19.4% here; the next tier (meat_lean 0-2, no longer mandatory at 2)
+    // clears tolerance exactly with meat_lean=1.
+    const result = solveExchanges({ kcal: 1200, proteinG: 36, fatG: 33, carbsG: 190, fibreG: 30, dietType: "non_vegetarian" })
+    expect(result.ok, JSON.stringify(result)).toBe(true)
+    if (!result.ok) return
+    expect(result.exchangeCounts.meat_lean).toBe(1)
+    expect(result.exchangeCounts.meat).toBe(0)
+  })
+
+  it("eggetarian falls back to a single egg (meat = 1) when 2 eggs' fat/protein can't fit tolerance", () => {
+    // Sneha (TEST-003)'s real target: 2 eggs pushes fat ~2.1% over the 1.5%
+    // ceiling (verified while building this fallback), so the solver must
+    // drop to the 1-egg tier to reproduce her real, historical plan.
+    const result = solveExchanges({ kcal: 1459, proteinG: 73, fatG: 48, carbsG: 184, fibreG: 30, dietType: "eggetarian" })
+    expect(result.ok, JSON.stringify(result)).toBe(true)
+    if (!result.ok) return
+    expect(result.exchangeCounts.meat).toBe(1)
+  })
+
   it("sugar is 0 unless explicitly enabled", () => {
     const off = countsOf(solveExchanges({ ...base, dietType: "vegetarian" }))
     const on = countsOf(solveExchanges({ ...base, dietType: "vegetarian", sugarEnabled: true }))
@@ -119,5 +168,87 @@ describe("solveExchanges — floors always hold", () => {
     expect(counts.vegetable_a).toBeGreaterThanOrEqual(4)
     expect(counts.vegetable_b).toBeGreaterThanOrEqual(2)
     expect(counts.fruit).toBeGreaterThanOrEqual(3)
+  })
+})
+
+describe("solveExchanges — milk_cow capped at 1 exchange, milk_skim absorbs the rest (dietitian directive)", () => {
+  const base = { kcal: 1900, proteinG: 65, fatG: 55, carbsG: 286, fibreG: 30 }
+
+  function countsOf(result: ReturnType<typeof solveExchanges>) {
+    return result.ok ? result.exchangeCounts : result.best.exchangeCounts
+  }
+
+  it("never exceeds 1 milk_cow exchange (250 ml) for any non-vegan diet type", () => {
+    for (const dietType of ["vegetarian", "eggetarian", "non_vegetarian", "jain"] as const) {
+      const counts = countsOf(solveExchanges({ ...base, dietType }))
+      expect(counts.milk_cow, dietType).toBeLessThanOrEqual(1)
+    }
+  })
+
+  it("vegan still carries zero milk_cow AND zero milk_skim — no dairy exchange at all", () => {
+    const counts = countsOf(solveExchanges({ ...base, dietType: "vegan" }))
+    expect(counts.milk_cow).toBe(0)
+    expect(counts.milk_skim).toBe(0)
+  })
+
+  it("can use milk_skim (Raita/Chaach) when the target needs more dairy macro than 1 milk_cow exchange provides", () => {
+    // A high-protein target relative to a moderate fat ceiling, where
+    // milk_skim's extra protein+carbs (0 fat, unlike milk_cow) is a cheaper
+    // way to close the gap than pushing pulse further.
+    const result = solveExchanges({ kcal: 2200, proteinG: 110, fatG: 50, carbsG: 320, fibreG: 30, dietType: "vegetarian" })
+    expect(result.ok, JSON.stringify(result)).toBe(true)
+    if (!result.ok) return
+    expect(result.exchangeCounts.milk_cow).toBeLessThanOrEqual(1)
+    expect(result.exchangeCounts.milk_skim).toBeGreaterThan(0)
+  })
+
+  it("Deepak Sharma's real target (2618 kcal, vegetarian) still clears tolerance at milk_cow=1, compensated by the solver's existing fat/pulse/fruit flexibility", () => {
+    const result = solveExchanges({ kcal: 2618, proteinG: 73, fatG: 76, carbsG: 411, fibreG: 30, dietType: "vegetarian" })
+    expect(result.ok, JSON.stringify(result)).toBe(true)
+    if (!result.ok) return
+    expect(result.exchangeCounts.milk_cow).toBe(1)
+    expect(result.deviation.kcal).toBeLessThan(0.015)
+    expect(result.deviation.proteinG).toBeLessThan(0.015)
+    expect(result.deviation.fatG).toBeLessThan(0.015)
+    expect(result.deviation.carbsG).toBeLessThan(0.015)
+  })
+})
+
+describe("solveExchanges — vegetable_a capped at 2 exchanges for non_vegetarian only", () => {
+  // non_vegetarian's meat_lean always anchors dinner (meal-distributor.ts),
+  // structurally excluding vegetable_a from ever landing there — so the
+  // day's whole vegetable_a allocation always lands at the one remaining
+  // meal (lunch). A dietitian confirmed capping it at 2 exchanges (200 g,
+  // one realistic dish) for this population specifically is fine, with
+  // cereal absorbing the resulting carb difference. Every other diet type
+  // keeps the full 4-exchange floor since they split vegetable_a naturally
+  // across both lunch and dinner.
+  function countsOf(result: ReturnType<typeof solveExchanges>) {
+    return result.ok ? result.exchangeCounts : result.best.exchangeCounts
+  }
+
+  it("non_vegetarian never exceeds 2 vegetable_a exchanges, even on a target that would otherwise widen the search", () => {
+    // Rahul (TEST-002)'s real target — comfortably solvable, but exercising
+    // the same target used elsewhere to confirm the cap holds under real
+    // numbers, not just a synthetic one.
+    const result = solveExchanges({ kcal: 2339, proteinG: 108, fatG: 58, carbsG: 346, fibreG: 31, dietType: "non_vegetarian" })
+    expect(result.ok, JSON.stringify(result)).toBe(true)
+    if (!result.ok) return
+    expect(result.exchangeCounts.vegetable_a).toBe(2)
+  })
+
+  it("other diet types keep the full 4-exchange floor (widened up to 8) — the cap is non_vegetarian-specific", () => {
+    const base = { kcal: 1900, proteinG: 65, fatG: 55, carbsG: 286, fibreG: 30 }
+    for (const dietType of ["vegetarian", "eggetarian", "jain"] as const) {
+      const counts = countsOf(solveExchanges({ ...base, dietType }))
+      expect(counts.vegetable_a, dietType).toBeGreaterThanOrEqual(4)
+    }
+  })
+
+  it("compensates the reduced vegetable_a with more cereal rather than drifting off the carbs target", () => {
+    const result = solveExchanges({ kcal: 2339, proteinG: 108, fatG: 58, carbsG: 346, fibreG: 31, dietType: "non_vegetarian" })
+    expect(result.ok, JSON.stringify(result)).toBe(true)
+    if (!result.ok) return
+    expect(result.deviation.carbsG).toBeLessThan(0.015)
   })
 })

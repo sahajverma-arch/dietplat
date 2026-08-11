@@ -1,0 +1,24 @@
+-- LEANR: retire "Makki Roti Meal" (punjabi breakfast archetype, added in
+-- 20260810900000_breakfast_evening_archetypes.sql) — its entire premise
+-- (Makki roti as a breakfast cereal) is now invalid: a dietitian directive
+-- removed 'breakfast' from Makki roti's own meal_slots (see
+-- 20260810950000-adjacent food-data change to table41_foods.json/foods —
+-- plain roti/makki roti are lunch/dinner staples, not breakfast food).
+--
+-- Leaving this archetype active would not throw (eligible-foods.ts's
+-- per-component graceful fallback widens back to the full pool whenever a
+-- dish-family narrowing would come up empty), but it silently distorted
+-- variety instead: with 2 active punjabi breakfast archetypes (Aloo Paratha
+-- Meal, Makki Roti Meal) sharing the weekly dish-family union that narrows
+-- eligible-foods.ts's cereal pool for the whole week, removing Makki roti's
+-- eligibility collapsed EVERY day onto Aloo Paratha alone, since Gobi/
+-- Methi/Mooli Paratha, Oats, Poha, and Corn flakes were never linked to
+-- either archetype's own dish family and so were never in that union to
+-- begin with. Retiring the now-invalid archetype removes it from the
+-- weekly union going forward.
+--
+-- Deactivating (not deleting) — foods.is_active / meal_archetypes.is_active
+-- are the established retirement mechanism throughout this schema (see
+-- 20260810910000_retire_paneer_paratha.sql).
+
+update public.meal_archetypes set is_active = false where code = 'punjabi_makki_roti_meal';
