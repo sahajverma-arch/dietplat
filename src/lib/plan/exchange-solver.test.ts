@@ -25,18 +25,18 @@ describe("solveExchanges — real plan reproduction (Deepak Sharma, maintenance)
     expectWithinTolerance(result)
   })
 
-  it("lands close to the real decoded skeleton (18 cereal, 1 milk_cow, 2 pulse, 3 veg_a, 2 veg_b, 6 fruit, 11 fat)", () => {
+  it("lands close to the real decoded skeleton (18 cereal, 0 milk_cow, 2 pulse, 3 veg_a, 2 veg_b, 6 fruit, 11 fat)", () => {
     if (!result.ok) throw new Error("solver failed")
     // Not an exact match requirement (the solver explores its own search
     // space independently) — but should be in the same neighbourhood as
     // what actually shipped, since it targets the same numbers. milk_cow is
-    // 1 here, not the real plan's 2: MILK_COW_CAP now fixes it at 1 exchange
-    // (250 ml) for every diet type — a dietitian directive, confirmed after
-    // this change — with the solver's existing fat/pulse/fruit flexibility
-    // (not milk_skim, for this particular target) absorbing the difference.
+    // 0 here, not the real plan's 2: MILK_COW_CAP now fixes it at 0
+    // exchanges for every diet type — a dietitian directive to default to
+    // curd (milk_skim) over milk — with the solver's existing fat/pulse/
+    // milk_skim flexibility absorbing the difference.
     expect(result.exchangeCounts.cereal).toBeGreaterThan(14)
     expect(result.exchangeCounts.cereal).toBeLessThan(22)
-    expect(result.exchangeCounts.milk_cow).toBe(1)
+    expect(result.exchangeCounts.milk_cow).toBe(0)
     expect(result.exchangeCounts.meat).toBe(0)
     expect(result.exchangeCounts.meat_lean).toBe(0)
     expect(result.exchangeCounts.vegetable_a).toBeGreaterThanOrEqual(4)
@@ -171,17 +171,17 @@ describe("solveExchanges — floors always hold", () => {
   })
 })
 
-describe("solveExchanges — milk_cow capped at 1 exchange, milk_skim absorbs the rest (dietitian directive)", () => {
+describe("solveExchanges — milk_cow defaults to 0, milk_skim (curd) fixed at 1 exchange/day (dietitian directive)", () => {
   const base = { kcal: 1900, proteinG: 65, fatG: 55, carbsG: 286, fibreG: 30 }
 
   function countsOf(result: ReturnType<typeof solveExchanges>) {
     return result.ok ? result.exchangeCounts : result.best.exchangeCounts
   }
 
-  it("never exceeds 1 milk_cow exchange (250 ml) for any non-vegan diet type", () => {
-    for (const dietType of ["vegetarian", "eggetarian", "non_vegetarian", "jain"] as const) {
+  it("never uses milk_cow for any diet type — curd is the default dairy exchange, not milk", () => {
+    for (const dietType of ["vegetarian", "eggetarian", "non_vegetarian", "jain", "vegan"] as const) {
       const counts = countsOf(solveExchanges({ ...base, dietType }))
-      expect(counts.milk_cow, dietType).toBeLessThanOrEqual(1)
+      expect(counts.milk_cow, dietType).toBe(0)
     }
   })
 
@@ -191,22 +191,18 @@ describe("solveExchanges — milk_cow capped at 1 exchange, milk_skim absorbs th
     expect(counts.milk_skim).toBe(0)
   })
 
-  it("can use milk_skim (Raita/Chaach) when the target needs more dairy macro than 1 milk_cow exchange provides", () => {
-    // A high-protein target relative to a moderate fat ceiling, where
-    // milk_skim's extra protein+carbs (0 fat, unlike milk_cow) is a cheaper
-    // way to close the gap than pushing pulse further.
-    const result = solveExchanges({ kcal: 2200, proteinG: 110, fatG: 50, carbsG: 320, fibreG: 30, dietType: "vegetarian" })
-    expect(result.ok, JSON.stringify(result)).toBe(true)
-    if (!result.ok) return
-    expect(result.exchangeCounts.milk_cow).toBeLessThanOrEqual(1)
-    expect(result.exchangeCounts.milk_skim).toBeGreaterThan(0)
+  it("fixes milk_skim at exactly 1 exchange (320 g curd, MILK_SKIM_CAP) for every non-vegan diet type — never searched as a range, same anchor role MILK_COW_CAP used to hold", () => {
+    for (const dietType of ["vegetarian", "eggetarian", "non_vegetarian", "jain"] as const) {
+      const counts = countsOf(solveExchanges({ ...base, dietType }))
+      expect(counts.milk_skim, dietType).toBe(1)
+    }
   })
 
-  it("Deepak Sharma's real target (2618 kcal, vegetarian) still clears tolerance at milk_cow=1, compensated by the solver's existing fat/pulse/fruit flexibility", () => {
+  it("Deepak Sharma's real target (2618 kcal, vegetarian) still clears tolerance with milk_cow=0, compensated by milk_skim/fat/pulse flexibility", () => {
     const result = solveExchanges({ kcal: 2618, proteinG: 73, fatG: 76, carbsG: 411, fibreG: 30, dietType: "vegetarian" })
     expect(result.ok, JSON.stringify(result)).toBe(true)
     if (!result.ok) return
-    expect(result.exchangeCounts.milk_cow).toBe(1)
+    expect(result.exchangeCounts.milk_cow).toBe(0)
     expect(result.deviation.kcal).toBeLessThan(0.015)
     expect(result.deviation.proteinG).toBeLessThan(0.015)
     expect(result.deviation.fatG).toBeLessThan(0.015)

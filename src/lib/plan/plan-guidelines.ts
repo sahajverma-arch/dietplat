@@ -325,7 +325,7 @@ export function buildNarrative({
     : `${capitalize(regionLabel)} ${dietTypeLabel} plan with ${pulseDescription}, ${vegDescription}, and fruit spread across ${fruitSlotCount} slot${fruitSlotCount === 1 ? "" : "s"}.`
 
   const sentence2 =
-    "The exchange skeleton is identical on all seven days and only the foods rotate, so calories and macros do not drift."
+    "Protein varies slightly day to day by design (a small dal-portion wobble, not a mistake) while the week's average lands exactly on target."
 
   const sentence3 = categoryNarrative(roadmapOutput)
 

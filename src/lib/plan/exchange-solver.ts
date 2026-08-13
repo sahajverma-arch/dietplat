@@ -62,23 +62,100 @@ const FAT_EXCHANGE_FLOOR = 2
 const VEGETABLE_A_FLOOR = 4
 const VEGETABLE_B_FLOOR = 2
 const FRUIT_FLOOR = 3
-const VEGAN_PULSE_FLOOR = 2
-const PULSE_SEARCH_SPAN = 8 // exchanges above the floor, in 0.5 steps
+// See the cerealFloor comment at its one call site (cereal's residual
+// computation) for why this only applies conditionally, not unconditionally
+// like the other floors above.
+const CEREAL_FLOOR_WHEN_WANTED = 4
+// Exported so daily-macro-jitter.ts's floor guard uses the same number this
+// solver actually searches from, instead of a second hardcoded copy that
+// could silently drift out of sync with it.
+export const VEGAN_PULSE_FLOOR = 2
+/**
+ * Exchanges above the floor, in 0.5 steps — was 8 (effectively no ceiling: 8
+ * exchanges = 240 g raw dal/day) until a real generated plan showed why
+ * that's a bug, not flexibility: once MILK_COW_CAP went to 0 and milk_skim
+ * got fixed at a small MILK_SKIM_CAP (see their own comments), pulse became
+ * the search's cheapest remaining lever to close a protein gap that milk
+ * used to help cover — and the cost search took it, landing on 7.5-8.5
+ * exchanges/day (225-255 g raw dal) split into two ~120 g single-meal
+ * servings, roughly 4x a realistic bowl of dal (Table 4.1's own 30 g/exchange
+ * IS meant to be one real katori — the bug was never the per-exchange
+ * weight, only how many of them the search was allowed to stack).
+ * A ceiling of 4 (6 for vegan, via its higher VEGAN_PULSE_FLOOR) keeps a
+ * day's pulse within 1-2 realistic exchanges per meal across lunch+dinner.
+ * This has a second, non-obvious benefit: it was ALSO silently starving
+ * cereal's own residual computation, since pulse's 17 g carbs/exchange was
+ * covering so much of the carbs target that cereal's leftover share
+ * shrank below 1 full exchange (20 g — less than one roti). Capping pulse
+ * frees that carb budget back up for cereal automatically; no separate fix
+ * needed there.
+ *
+ * The ceiling is 6, not 4: 4 was the first value tried, and broke a real
+ * golden client (Sneha, TEST-003) whose eggetarian tier 1 (a single egg,
+ * meat=1 — see anchorVariantTiers()'s own comment) specifically trades
+ * lower egg-protein for more pulse, and genuinely needs 6 exchanges to land
+ * within tolerance on her exact numbers — confirmed by instrumenting every
+ * tier's own search individually, not by guessing. 6 exchanges/day split
+ * ~evenly across lunch+dinner is ~90 g raw dal/meal — a generous single
+ * bowl, not the 120-135 g/meal (4-4.5 exchanges EACH, ~240 g/day total) the
+ * original uncapped search produced, but real rather than the idealized 4.
+ * This is also NOT the same knob as the widened attempt below reaching for
+ * this value: the widened attempt's own vegetable_a/vegetable_b/fruit floor
+ * increases turned out to make Sneha's case WORSE (more veg carbs on top of
+ * an already-tight carb budget), so the fix had to be the realistic ceiling
+ * itself, not an escape hatch one layer up.
+ */
+const PULSE_SEARCH_SPAN = 6
 const WIDEN_STEP = 2 // extra exchanges added to each floor on retry
-const MILK_SKIM_SEARCH_SPAN = 3 // exchanges above 0, in 0.5 steps — see milk_skim's own comment below
+/**
+ * A dietitian directive, not a macro constraint: curd is fixed at exactly 1
+ * milk_skim exchange (320 g — Curd's own servingRawG, close enough to the
+ * dietitian's "about 300 g/day" figure) every day, for every non-vegan diet
+ * type — never searched as a range. This was tried first as a floor + a wide
+ * search span (mirroring how the old milk_cow flexibility worked), but that
+ * let the cost search land on 3 milk_skim exchanges (960 g curd) for a real
+ * client target — the opposite of "only about 300 g," which is a cap, not a
+ * minimum. Fixed, not searched, is also the exact same anchor style
+ * MILK_COW_CAP itself used before this change (a single dietitian-set
+ * number, with the solver's existing fat/pulse/cereal residual flexibility
+ * absorbing whatever macro difference is left) — curd inherits that same
+ * anchor role milk used to hold, rather than becoming a second free variable.
+ */
+const MILK_SKIM_CAP = 1
 
 /**
- * A dietitian directive, not a macro constraint: a single sitting never
- * carries more than 1 milk_cow exchange (250 ml — Table 4.1's own standard
- * serving), for every diet type. Previously fixed at 2 for
- * vegetarian/eggetarian and searched [1, 2] for non_vegetarian — meal-
- * distributor.ts's INDIVISIBLE_TYPES then had to put the WHOLE day's count
- * in one slot, producing an unservable 500 ml glass of milk whenever 2 was
- * chosen. milk_skim (below) is what absorbs whatever dairy macro this cap
- * leaves uncovered, plated as Raita/Chaach at lunch instead of a second
- * glass of milk.
+ * A dietitian directive, not a macro constraint: milk_cow defaults to 0
+ * exchanges for every diet type (vegan already excluded it entirely; this
+ * extends the same "no milk by default" floor to vegetarian/eggetarian/
+ * non_vegetarian/jain too) — curd (milk_skim) is the default dairy exchange
+ * now, milk only when a dietitian specifically overrides it for a client.
+ * milk_skim (below) picks up ALL of the day's dairy macro that used to be
+ * split between a fixed 1 milk_cow exchange (250 ml) and milk_skim covering
+ * the excess — MILK_SKIM_SEARCH_SPAN is widened accordingly. This was
+ * previously fixed at 2 for vegetarian/eggetarian and searched [1, 2] for
+ * non_vegetarian, then capped at exactly 1 (never 2) because meal-
+ * distributor.ts's INDIVISIBLE_TYPES has to put the WHOLE day's count in one
+ * slot, and 2 produced an unservable 500 ml glass of milk in one sitting —
+ * that indivisibility problem doesn't apply to curd, which is naturally
+ * split across lunch and dinner instead.
  */
-const MILK_COW_CAP = 1
+const MILK_COW_CAP = 0
+
+/**
+ * Absolute last resort: a real golden target (Sneha, TEST-003 — ~73 g
+ * protein at a tight ~48 g fat ceiling) turned out to be infeasible on curd
+ * alone. milk_skim carries 0 g fat vs milk_cow's 10 g, and none of pulse/
+ * vegetables/cereal carry fat either — for a low-fat-ceiling eggetarian
+ * target, losing that 10 g pushes the fat-exchange residual just past the
+ * coarse 2.5 g grid's reach no matter how every other exchange is chosen
+ * (confirmed: every no-milk tier, both floor widths, still misses by ~1 g).
+ * anchorVariantTiers() appends one rescue tier per diet type (except vegan,
+ * which excludes dairy for an unrelated reason) with milk_cow restored to
+ * this value, tried only after every curd-only tier has already failed —
+ * so a client only ever gets milk when curd genuinely cannot hit the target,
+ * never as a default or a preference.
+ */
+const MILK_COW_RESCUE = 1
 
 /**
  * Non-vegetarian-specific: meat_lean now always anchors to dinner (see
@@ -126,7 +203,7 @@ interface AnchorVariant {
  * can't fit. Tier 2 is the last-resort escape hatch allowing a lone 1 egg,
  * same reasoning as eggetarian's tier 1.
  */
-function anchorVariantTiers(dietType: DietType): AnchorVariant[][] {
+function curdOnlyTiers(dietType: DietType): AnchorVariant[][] {
   switch (dietType) {
     case "vegetarian":
     case "jain":
@@ -165,6 +242,25 @@ function anchorVariantTiers(dietType: DietType): AnchorVariant[][] {
       ]
     }
   }
+}
+
+/**
+ * curdOnlyTiers()'s list, plus one milk-rescue tier appended per curd-only
+ * tier (identical meat/meatLean options, milk_cow restored to
+ * MILK_COW_RESCUE instead of MILK_COW_CAP) — see MILK_COW_RESCUE's own
+ * comment for why this exists. Vegan is excluded entirely: its milk_cow=0
+ * is "no dairy at all" for an unrelated reason, not "curd instead of milk,"
+ * so there is nothing to rescue with milk there. Every curd-only tier is
+ * tried, in its normal preference order, before ANY milk-rescue tier —
+ * milk is the last resort across the board, never preferred over a looser
+ * curd-only egg/meat combination.
+ */
+function anchorVariantTiers(dietType: DietType): AnchorVariant[][] {
+  const curdOnly = curdOnlyTiers(dietType)
+  if (dietType === "vegan") return curdOnly
+
+  const milkRescue = curdOnly.map((tier) => tier.map((variant) => ({ ...variant, milkCow: MILK_COW_RESCUE })))
+  return [...curdOnly, ...milkRescue]
 }
 
 function deviationOf(achieved: AchievedMacros, target: SolverInput): Deviation {
@@ -215,20 +311,36 @@ interface SearchFloors {
   fruit: number
   /** True for non_vegetarian — see NON_VEGETARIAN_VEGETABLE_A_CAP. Fixes vegetableA at exactly `vegetableA`, skipping the usual +WIDEN_STEP search above it. */
   vegetableACapped?: boolean
+  /**
+   * Ceiling for milk_skim's own small search band above MILK_SKIM_CAP — {1}
+   * (a single value, no band at all) on attemptTier()'s base attempt, so
+   * curd is exactly "about 300 g/day" whenever that alone clears tolerance;
+   * MILK_SKIM_CAP + WIDEN_STEP on the widened attempt, the same coarse-grid
+   * rescue latitude vegetable_b/fruit already get there. Needed because a
+   * single hard-fixed milk_skim value (tried first) narrowly failed
+   * tolerance on a real golden target (Sneha, TEST-003) purely from Table
+   * 4.1's coarse fat-exchange grid — the same class of near-miss
+   * neighboringHalfSteps() already exists to rescue for fat/cereal, just one
+   * layer up (attemptTier()'s two-attempt fallback) since milk_skim isn't
+   * solved as a direct residual the way fat/cereal are.
+   */
+  milkSkimCeiling: number
 }
 
 function search(input: SolverInput, floors: SearchFloors, variants: AnchorVariant[]) {
   let best: { counts: ExchangeCounts; achieved: AchievedMacros; cost: number } | null = null
 
   const pulseFloor = input.dietType === "vegan" ? VEGAN_PULSE_FLOOR : 0
-  // Vegan excludes every dairy exchange, milk_skim included — see
-  // MILK_COW_CAP's own comment for why milk_skim is searched at all.
-  const milkSkimMax = input.dietType === "vegan" ? 0 : MILK_SKIM_SEARCH_SPAN
+  const milkSkimCeiling = input.dietType === "vegan" ? 0 : floors.milkSkimCeiling
   const vegetableAUpper = floors.vegetableACapped ? floors.vegetableA : floors.vegetableA + WIDEN_STEP
+
+  // Vegan excludes every dairy exchange, milk_skim included — see
+  // MILK_COW_CAP's own comment for why milk_skim is used at all.
+  const milkSkimFloor = input.dietType === "vegan" ? 0 : MILK_SKIM_CAP
 
   for (const variant of variants) {
     for (let pulse = pulseFloor; pulse <= pulseFloor + PULSE_SEARCH_SPAN; pulse += 0.5) {
-      for (let milkSkim = 0; milkSkim <= milkSkimMax; milkSkim += 0.5) {
+      for (let milkSkim = milkSkimFloor; milkSkim <= milkSkimCeiling; milkSkim += 0.5) {
         for (let vegA = floors.vegetableA; vegA <= vegetableAUpper; vegA++) {
           for (let vegB = floors.vegetableB; vegB <= floors.vegetableB + WIDEN_STEP; vegB++) {
             for (let fruit = floors.fruit; fruit <= floors.fruit + WIDEN_STEP; fruit++) {
@@ -251,7 +363,25 @@ function search(input: SolverInput, floors: SearchFloors, variants: AnchorVarian
               )
 
               const carbsBeforeCereal = preFatMacros.carbsG // fat exchange carries no carbs
-              const cerealCandidates = neighboringHalfSteps((input.carbsG - carbsBeforeCereal) / TABLE_4_1.cereal.carbsG, 0)
+              const rawCereal = (input.carbsG - carbsBeforeCereal) / TABLE_4_1.cereal.carbsG
+              // A flat CEREAL_FLOOR was tried and rejected: some real targets
+              // (Sneha, TEST-003) genuinely need zero cereal — carbsBeforeCereal
+              // already meets the target, so rawCereal is at or below 0 — and
+              // forcing cereal onto that target pushed her carbs 26% over.
+              // But a target that DOES want some cereal (rawCereal > 0) still
+              // needs a realistic floor once it's wanted at all: cereal split
+              // across breakfast/lunch/evening/dinner (4 slots) rounding down
+              // to 0.5 exchanges (10 g total for the WHOLE DAY) is what left a
+              // real generated plan's evening slot completely empty — evening
+              // only allows cereal (fruit moved to mid_morning-only earlier
+              // this session), so "cereal consolidates elsewhere" there means
+              // "evening gets nothing to eat," not just a smaller portion.
+              // CEREAL_FLOOR_WHEN_WANTED(4) is picked to give a realistic ~1
+              // exchange to each of the 4 cereal-eligible slots on an even
+              // split — the conditional (only when genuinely wanted) is what
+              // lets this coexist with Sneha's genuine zero-cereal case.
+              const cerealFloor = rawCereal > 0 ? CEREAL_FLOOR_WHEN_WANTED : 0
+              const cerealCandidates = neighboringHalfSteps(rawCereal, cerealFloor)
 
               for (const fatExchanges of fatCandidates) {
                 for (const cerealExchanges of cerealCandidates) {
@@ -298,6 +428,8 @@ function attemptTier(
     vegetableB: VEGETABLE_B_FLOOR,
     fruit: FRUIT_FLOOR,
     vegetableACapped: isNonVegetarian,
+    // {1} only — curd stays exactly "about 300 g/day" whenever that alone clears tolerance.
+    milkSkimCeiling: MILK_SKIM_CAP,
   }
   const first = search(input, baseFloors, variants)
   const firstDeviation = deviationOf(first.achieved, input)
@@ -312,6 +444,9 @@ function attemptTier(
     vegetableB: VEGETABLE_B_FLOOR + WIDEN_STEP,
     fruit: FRUIT_FLOOR + WIDEN_STEP,
     vegetableACapped: isNonVegetarian,
+    // Coarse-grid rescue latitude, same reasoning as vegetable_b/fruit's own
+    // widening above — see SearchFloors.milkSkimCeiling's own comment.
+    milkSkimCeiling: MILK_SKIM_CAP + WIDEN_STEP,
   }
   const second = search(input, widenedFloors, variants)
   const secondDeviation = deviationOf(second.achieved, input)

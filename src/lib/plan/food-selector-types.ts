@@ -13,7 +13,15 @@ export interface FoodSelectorInput {
   region: string
   dietType: string
   mealCount: number
-  skeleton: Skeleton
+  /**
+   * One skeleton per day (index 0-6), not one shared skeleton for the whole
+   * week — see daily-macro-jitter.ts. Every skeleton is identical except for
+   * a small ±0.5 `pulse` exchange delta on some days (day-to-day variety
+   * while the week's average pulse count, and therefore average protein,
+   * stays exactly at the solved weekly target). A caller with no jitter to
+   * apply can simply pass the same skeleton 7 times.
+   */
+  skeletonsByDay: Skeleton[]
   /** From eligible-foods.ts's eligibleFoodsForSkeleton() — already region/diet/allergen/dislike/medical filtered, AND already archetype-narrowed wherever an archetype applied. */
   eligibleFoodsBySlot: Record<string, Partial<Record<ExchangeCode, Food[]>>>
   /**

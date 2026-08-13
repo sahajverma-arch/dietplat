@@ -1,8 +1,14 @@
 import { describe, expect, it } from "vitest"
 
 import { fallbackSelection } from "./food-selector-fallback"
+import type { Skeleton } from "./meal-distributor"
 import { makeFood } from "./test-fixtures"
 import type { FoodSelectorInput } from "./food-selector-types"
+
+/** No jitter in these fixtures — every day gets the identical skeleton, reproducing pre-jitter behavior exactly. */
+function sevenSkeletons(skeleton: Skeleton): Skeleton[] {
+  return new Array(7).fill(skeleton)
+}
 
 const roti = makeFood({ id: "roti", nameEn: "Roti", exchangeType: "cereal" })
 const rice = makeFood({ id: "rice", nameEn: "Rice", exchangeType: "cereal" })
@@ -14,13 +20,13 @@ const input: FoodSelectorInput = {
   region: "north_indian",
   dietType: "vegetarian",
   mealCount: 5,
-  skeleton: {
+  skeletonsByDay: sevenSkeletons({
     breakfast: [{ exchangeType: "cereal", count: 2 }],
     dinner: [
       { exchangeType: "vegetable_a", count: 2 },
       { exchangeType: "pulse", count: 1 },
     ],
-  },
+  }),
   eligibleFoodsBySlot: {
     breakfast: { cereal: [roti, rice] },
     dinner: { vegetable_a: [palak, bhindi], pulse: [moongDal] },
@@ -36,7 +42,7 @@ describe("fallbackSelection", () => {
 
   it("every day's exchange totals match the skeleton exactly", () => {
     for (const day of selection.days) {
-      for (const [slot, items] of Object.entries(input.skeleton)) {
+      for (const [slot, items] of Object.entries(input.skeletonsByDay[0])) {
         const meal = day.meals.find((m) => m.slot === slot)
         expect(meal, `day ${day.dayIndex} missing slot ${slot}`).toBeDefined()
         for (const skeletonItem of items) {
@@ -69,7 +75,7 @@ describe("fallbackSelection", () => {
       region: "north_indian",
       dietType: "non_vegetarian",
       mealCount: 5,
-      skeleton: { dinner: [{ exchangeType: "vegetable_a", count: 4 }] },
+      skeletonsByDay: sevenSkeletons({ dinner: [{ exchangeType: "vegetable_a", count: 4 }] }),
       eligibleFoodsBySlot: { dinner: { vegetable_a: [palak, bhindi] } },
     }
     const largeSelection = fallbackSelection(largeInput)
@@ -88,7 +94,7 @@ describe("fallbackSelection", () => {
       region: "north_indian",
       dietType: "non_vegetarian",
       mealCount: 5,
-      skeleton: { dinner: [{ exchangeType: "vegetable_a", count: 4 }] },
+      skeletonsByDay: sevenSkeletons({ dinner: [{ exchangeType: "vegetable_a", count: 4 }] }),
       eligibleFoodsBySlot: { dinner: { vegetable_a: [palak, bhindi] } },
     }
     const mixedDayIndex = (sel: ReturnType<typeof fallbackSelection>) =>
@@ -110,7 +116,7 @@ describe("fallbackSelection", () => {
       region: "north_indian",
       dietType: "non_vegetarian",
       mealCount: 5,
-      skeleton: { dinner: [{ exchangeType: "vegetable_a", count: 1.5 }] },
+      skeletonsByDay: sevenSkeletons({ dinner: [{ exchangeType: "vegetable_a", count: 1.5 }] }),
       eligibleFoodsBySlot: { dinner: { vegetable_a: [palak, bhindi] } },
     }
     const belowSelection = fallbackSelection(belowThresholdInput)
@@ -129,7 +135,7 @@ describe("fallbackSelection", () => {
       region: "north_indian",
       dietType: "non_vegetarian",
       mealCount: 5,
-      skeleton: { dinner: [{ exchangeType: "vegetable_a", count: 4 }] },
+      skeletonsByDay: sevenSkeletons({ dinner: [{ exchangeType: "vegetable_a", count: 4 }] }),
       eligibleFoodsBySlot: { dinner: { vegetable_a: [karela, lauki] } },
     }
     const soloOnlySelection = fallbackSelection(soloOnlyInput)
@@ -148,7 +154,7 @@ describe("fallbackSelection", () => {
       region: "north_indian",
       dietType: "non_vegetarian",
       mealCount: 5,
-      skeleton: { dinner: [{ exchangeType: "vegetable_a", count: 2.5 }] },
+      skeletonsByDay: sevenSkeletons({ dinner: [{ exchangeType: "vegetable_a", count: 2.5 }] }),
       eligibleFoodsBySlot: { dinner: { vegetable_a: [palak, bhindi] } },
     }
     const fractionalSelection = fallbackSelection(fractionalInput)
@@ -166,7 +172,7 @@ describe("fallbackSelection", () => {
       region: "north_indian",
       dietType: "non_vegetarian",
       mealCount: 5,
-      skeleton: { dinner: [{ exchangeType: "vegetable_b", count: 4 }] },
+      skeletonsByDay: sevenSkeletons({ dinner: [{ exchangeType: "vegetable_b", count: 4 }] }),
       eligibleFoodsBySlot: { dinner: { vegetable_b: [carrot, potato] } },
     }
     const vegBSelection = fallbackSelection(vegBInput)
@@ -214,7 +220,7 @@ describe("fallbackSelection", () => {
       region: "north_indian",
       dietType: "vegetarian",
       mealCount: 5,
-      skeleton: { evening: [{ exchangeType: "fruit", count: 2 }] },
+      skeletonsByDay: sevenSkeletons({ evening: [{ exchangeType: "fruit", count: 2 }] }),
       eligibleFoodsBySlot: { evening: { fruit: [orange, guava] } },
     }
     const fruitSelection = fallbackSelection(fruitInput)
@@ -223,6 +229,25 @@ describe("fallbackSelection", () => {
       const fruitItems = evening.items.filter((i) => i.exchangeType === "fruit")
       expect(fruitItems).toHaveLength(2)
       expect(new Set(fruitItems.map((i) => i.foodId)).size).toBe(2)
+    }
+  })
+
+  it("mid_morning is the one exception — always exactly ONE fruit food for its full count, never split, even at count >= 2 (dietitian directive)", () => {
+    const orange = makeFood({ id: "orange", nameEn: "Orange", exchangeType: "fruit" })
+    const guava = makeFood({ id: "guava", nameEn: "Guava", exchangeType: "fruit" })
+    const fruitInput: FoodSelectorInput = {
+      region: "north_indian",
+      dietType: "vegetarian",
+      mealCount: 5,
+      skeletonsByDay: sevenSkeletons({ mid_morning: [{ exchangeType: "fruit", count: 2 }] }),
+      eligibleFoodsBySlot: { mid_morning: { fruit: [orange, guava] } },
+    }
+    const fruitSelection = fallbackSelection(fruitInput)
+    for (const day of fruitSelection.days) {
+      const midMorning = day.meals.find((m) => m.slot === "mid_morning")!
+      const fruitItems = midMorning.items.filter((i) => i.exchangeType === "fruit")
+      expect(fruitItems).toHaveLength(1)
+      expect(fruitItems[0].exchangeCount).toBe(2)
     }
   })
 })
@@ -244,12 +269,12 @@ describe("fallbackSelection — works correctly with an archetype-narrowed pool 
     region: "south_indian",
     dietType: "vegetarian",
     mealCount: 5,
-    skeleton: {
+    skeletonsByDay: sevenSkeletons({
       breakfast: [
         { exchangeType: "cereal", count: 2 },
         { exchangeType: "pulse", count: 0.5 },
       ],
-    },
+    }),
     eligibleFoodsBySlot: {
       breakfast: { cereal: [idli], pulse: [sambar] },
     },
@@ -286,12 +311,12 @@ describe("fallbackSelection — vegetable_a + vegetable_b never render as two se
       region: "punjabi",
       dietType: "vegetarian",
       mealCount: 5,
-      skeleton: {
+      skeletonsByDay: sevenSkeletons({
         lunch: [
           { exchangeType: "vegetable_a", count: 2 },
           { exchangeType: "vegetable_b", count: 2 },
         ],
-      },
+      }),
       eligibleFoodsBySlot: { lunch: { vegetable_a: [tinda], vegetable_b: [sweetCorn, carrot, onion] } },
     }
     const selection = fallbackSelection(input)
@@ -314,12 +339,12 @@ describe("fallbackSelection — vegetable_a + vegetable_b never render as two se
       region: "punjabi",
       dietType: "vegetarian",
       mealCount: 5,
-      skeleton: {
+      skeletonsByDay: sevenSkeletons({
         lunch: [
           { exchangeType: "vegetable_a", count: 2 },
           { exchangeType: "vegetable_b", count: 2 },
         ],
-      },
+      }),
       eligibleFoodsBySlot: { lunch: { vegetable_a: [tinda], vegetable_b: [sweetCornCurated] } },
       curatedVegetableFamilyPairs: new Set(["sweet-corn-family|tinda-family"]),
     }
@@ -337,12 +362,12 @@ describe("fallbackSelection — vegetable_a + vegetable_b never render as two se
       region: "punjabi",
       dietType: "vegetarian",
       mealCount: 5,
-      skeleton: {
+      skeletonsByDay: sevenSkeletons({
         lunch: [
           { exchangeType: "vegetable_a", count: 2 },
           { exchangeType: "vegetable_b", count: 2 },
         ],
-      },
+      }),
       eligibleFoodsBySlot: { lunch: { vegetable_a: [tinda], vegetable_b: [sweetCorn] } },
     }
     expect(() => fallbackSelection(input)).not.toThrow()
@@ -359,7 +384,7 @@ describe("fallbackSelection — vegetable_a + vegetable_b never render as two se
       region: "punjabi",
       dietType: "vegetarian",
       mealCount: 5,
-      skeleton: { evening: [{ exchangeType: "vegetable_b", count: 2 }] },
+      skeletonsByDay: sevenSkeletons({ evening: [{ exchangeType: "vegetable_b", count: 2 }] }),
       eligibleFoodsBySlot: { evening: { vegetable_b: [sweetCorn, carrot] } },
     }
     const selection = fallbackSelection(input)
@@ -379,12 +404,12 @@ describe("fallbackSelection — no cooking fat alongside a plain porridge cereal
       region: "punjabi",
       dietType: "vegetarian",
       mealCount: 5,
-      skeleton: {
+      skeletonsByDay: sevenSkeletons({
         breakfast: [
           { exchangeType: "cereal", count: 1 },
           { exchangeType: "fat", count: 1 },
         ],
-      },
+      }),
       eligibleFoodsBySlot: { breakfast: { cereal: [oats], fat: [ghee, almonds] } },
     }
     const selection = fallbackSelection(input)
@@ -395,37 +420,38 @@ describe("fallbackSelection — no cooking fat alongside a plain porridge cereal
     }
   })
 
-  it("leaves the fat pool unrestricted when the cereal isn't tagged no_cooking_fat (e.g. a paratha)", () => {
+  it("restricts breakfast's fat pool to cooking-fat-only when the cereal isn't tagged no_cooking_fat (e.g. a paratha) — nuts are reserved for mid_morning", () => {
     const input: FoodSelectorInput = {
       region: "punjabi",
       dietType: "vegetarian",
       mealCount: 5,
-      skeleton: {
+      skeletonsByDay: sevenSkeletons({
         breakfast: [
           { exchangeType: "cereal", count: 1 },
           { exchangeType: "fat", count: 1 },
         ],
-      },
+      }),
       eligibleFoodsBySlot: { breakfast: { cereal: [paratha], fat: [ghee, almonds] } },
     }
     const selection = fallbackSelection(input)
-    const foodIds = new Set(
-      selection.days.map((d) => d.meals.find((m) => m.slot === "breakfast")!.items.find((i) => i.exchangeType === "fat")!.foodId)
-    )
-    expect(foodIds.has("ghee")).toBe(true)
+    for (const day of selection.days) {
+      const breakfast = day.meals.find((m) => m.slot === "breakfast")!
+      const fatItem = breakfast.items.find((i) => i.exchangeType === "fat")!
+      expect(fatItem.foodId, `day ${day.dayIndex}`).toBe("ghee")
+    }
   })
 
-  it("degrades to the full fat pool when no non-cooking-fat alternative is eligible — never throws", () => {
+  it("degrades to the full fat pool when no non-cooking-fat alternative is eligible for an Oats-style cereal — never throws", () => {
     const input: FoodSelectorInput = {
       region: "punjabi",
       dietType: "vegetarian",
       mealCount: 5,
-      skeleton: {
+      skeletonsByDay: sevenSkeletons({
         breakfast: [
           { exchangeType: "cereal", count: 1 },
           { exchangeType: "fat", count: 1 },
         ],
-      },
+      }),
       eligibleFoodsBySlot: { breakfast: { cereal: [oats], fat: [ghee] } },
     }
     expect(() => fallbackSelection(input)).not.toThrow()
@@ -434,6 +460,43 @@ describe("fallbackSelection — no cooking fat alongside a plain porridge cereal
       const breakfast = day.meals.find((m) => m.slot === "breakfast")!
       const fatItem = breakfast.items.find((i) => i.exchangeType === "fat")!
       expect(fatItem.foodId).toBe("ghee")
+    }
+  })
+
+  it("degrades to the full fat pool for a regular cereal when no cooking-fat option is eligible — never throws", () => {
+    const input: FoodSelectorInput = {
+      region: "punjabi",
+      dietType: "vegetarian",
+      mealCount: 5,
+      skeletonsByDay: sevenSkeletons({
+        breakfast: [
+          { exchangeType: "cereal", count: 1 },
+          { exchangeType: "fat", count: 1 },
+        ],
+      }),
+      eligibleFoodsBySlot: { breakfast: { cereal: [paratha], fat: [almonds] } },
+    }
+    expect(() => fallbackSelection(input)).not.toThrow()
+    const selection = fallbackSelection(input)
+    for (const day of selection.days) {
+      const breakfast = day.meals.find((m) => m.slot === "breakfast")!
+      const fatItem = breakfast.items.find((i) => i.exchangeType === "fat")!
+      expect(fatItem.foodId).toBe("almonds")
+    }
+  })
+
+  it("leaves other slots (mid_morning) fully unrestricted by the breakfast-specific rule — nuts still selected normally there", () => {
+    const input: FoodSelectorInput = {
+      region: "punjabi",
+      dietType: "vegetarian",
+      mealCount: 5,
+      skeletonsByDay: sevenSkeletons({ mid_morning: [{ exchangeType: "fat", count: 1 }] }),
+      eligibleFoodsBySlot: { mid_morning: { fat: [almonds] } },
+    }
+    const selection = fallbackSelection(input)
+    for (const day of selection.days) {
+      const midMorning = day.meals.find((m) => m.slot === "mid_morning")!
+      expect(midMorning.items.find((i) => i.exchangeType === "fat")!.foodId).toBe("almonds")
     }
   })
 })
@@ -449,7 +512,7 @@ describe("fallbackSelection — same-day protein exclusion", () => {
     region: "north_indian",
     dietType: "vegetarian",
     mealCount: 5,
-    skeleton: {
+    skeletonsByDay: sevenSkeletons({
       lunch: [
         { exchangeType: "cereal", count: 2 },
         { exchangeType: "pulse", count: 1 },
@@ -458,7 +521,7 @@ describe("fallbackSelection — same-day protein exclusion", () => {
         { exchangeType: "cereal", count: 2 },
         { exchangeType: "pulse", count: 1 },
       ],
-    },
+    }),
     eligibleFoodsBySlot: {
       lunch: { cereal: [rice, roti], pulse: [rajma, chana, moong] },
       dinner: { cereal: [rice, roti], pulse: [rajma, chana, moong] },
@@ -529,6 +592,261 @@ describe("fallbackSelection — same-day protein exclusion", () => {
   it("is deterministic with same-day exclusion active", () => {
     const first = fallbackSelection(lunchDinnerInput)
     const second = fallbackSelection(lunchDinnerInput)
+    expect(first).toEqual(second)
+  })
+})
+
+describe("fallbackSelection — same-day fat exclusion", () => {
+  const rice = makeFood({ id: "rice", nameEn: "Rice", exchangeType: "cereal" })
+  const roti = makeFood({ id: "roti", nameEn: "Roti", exchangeType: "cereal" })
+  const ghee = makeFood({ id: "ghee", nameEn: "Ghee", exchangeType: "fat", tags: ["cooking_fat"] })
+  const mustardOil = makeFood({ id: "mustard-oil", nameEn: "Mustard oil", exchangeType: "fat", tags: ["cooking_fat"] })
+
+  const lunchDinnerFatInput: FoodSelectorInput = {
+    region: "punjabi",
+    dietType: "non_vegetarian",
+    mealCount: 5,
+    skeletonsByDay: sevenSkeletons({
+      lunch: [
+        { exchangeType: "cereal", count: 2 },
+        { exchangeType: "fat", count: 1 },
+      ],
+      dinner: [
+        { exchangeType: "cereal", count: 2 },
+        { exchangeType: "fat", count: 1 },
+      ],
+    }),
+    eligibleFoodsBySlot: {
+      lunch: { cereal: [rice, roti], fat: [ghee, mustardOil] },
+      dinner: { cereal: [rice, roti], fat: [ghee, mustardOil] },
+    },
+  }
+
+  it("never picks the same fat for lunch and dinner on the same day when alternatives exist — real generated PDF showed Ghee at both, every day", () => {
+    const result = fallbackSelection(lunchDinnerFatInput)
+    for (const day of result.days) {
+      const lunchFat = day.meals.find((m) => m.slot === "lunch")!.items.find((i) => i.exchangeType === "fat")!
+      const dinnerFat = day.meals.find((m) => m.slot === "dinner")!.items.find((i) => i.exchangeType === "fat")!
+      expect(lunchFat.foodId, `day ${day.dayIndex}`).not.toBe(dinnerFat.foodId)
+    }
+  })
+
+  it("degrades gracefully to a repeat when no alternative fat exists", () => {
+    const onlyOneFat: FoodSelectorInput = {
+      ...lunchDinnerFatInput,
+      eligibleFoodsBySlot: {
+        lunch: { cereal: [rice, roti], fat: [ghee] },
+        dinner: { cereal: [rice, roti], fat: [ghee] },
+      },
+    }
+    expect(() => fallbackSelection(onlyOneFat)).not.toThrow()
+    const result = fallbackSelection(onlyOneFat)
+    for (const day of result.days) {
+      const lunchFat = day.meals.find((m) => m.slot === "lunch")!.items.find((i) => i.exchangeType === "fat")!
+      const dinnerFat = day.meals.find((m) => m.slot === "dinner")!.items.find((i) => i.exchangeType === "fat")!
+      expect(lunchFat.foodId).toBe("ghee")
+      expect(dinnerFat.foodId).toBe("ghee")
+    }
+  })
+
+  it("excludes by dish family, not just by food id", () => {
+    const gheeA = makeFood({ id: "ghee-a", nameEn: "Ghee (batch A)", exchangeType: "fat", dishFamilyId: "ghee-family" })
+    const gheeB = makeFood({ id: "ghee-b", nameEn: "Ghee (batch B)", exchangeType: "fat", dishFamilyId: "ghee-family" })
+    const oil = makeFood({ id: "oil", nameEn: "Groundnut oil", exchangeType: "fat", dishFamilyId: "oil-family" })
+
+    const familyInput: FoodSelectorInput = {
+      ...lunchDinnerFatInput,
+      eligibleFoodsBySlot: {
+        lunch: { cereal: [rice, roti], fat: [gheeA, gheeB] },
+        dinner: { cereal: [rice, roti], fat: [gheeA, gheeB, oil] },
+      },
+    }
+    const result = fallbackSelection(familyInput)
+    for (const day of result.days) {
+      const dinnerFat = day.meals.find((m) => m.slot === "dinner")!.items.find((i) => i.exchangeType === "fat")!
+      expect(dinnerFat.foodId).toBe("oil")
+    }
+  })
+
+  it("prefers a different food within the SAME shared family over falling back to fully unrestricted — Almonds/Walnut share one family with no other alternative", () => {
+    const almonds = makeFood({ id: "almonds", nameEn: "Almonds", exchangeType: "fat", dishFamilyId: "nuts-family" })
+    const walnut = makeFood({ id: "walnut", nameEn: "Walnut", exchangeType: "fat", dishFamilyId: "nuts-family" })
+
+    const sharedFamilyInput: FoodSelectorInput = {
+      ...lunchDinnerFatInput,
+      eligibleFoodsBySlot: {
+        lunch: { cereal: [rice, roti], fat: [almonds, walnut] },
+        dinner: { cereal: [rice, roti], fat: [almonds, walnut] },
+      },
+    }
+    const result = fallbackSelection(sharedFamilyInput)
+    for (const day of result.days) {
+      const lunchFat = day.meals.find((m) => m.slot === "lunch")!.items.find((i) => i.exchangeType === "fat")!
+      const dinnerFat = day.meals.find((m) => m.slot === "dinner")!.items.find((i) => i.exchangeType === "fat")!
+      // Family-level exclusion alone would empty the pool the moment either
+      // is used (both share "nuts-family"), forcing a fall-all-the-way-back
+      // to unrestricted — this asserts the intermediate "at least a
+      // different literal food" tier kicks in first instead.
+      expect(lunchFat.foodId, `day ${day.dayIndex}`).not.toBe(dinnerFat.foodId)
+    }
+  })
+
+  it("combines correctly with the no_cooking_fat restriction — oats breakfast still avoids cooking fat, AND mid-morning still avoids repeating breakfast's nut", () => {
+    const oats = makeFood({ id: "oats", nameEn: "Oats", exchangeType: "cereal", tags: ["no_cooking_fat"] })
+    const almonds = makeFood({ id: "almonds", nameEn: "Almonds", exchangeType: "fat" })
+    const walnut = makeFood({ id: "walnut", nameEn: "Walnut", exchangeType: "fat" })
+
+    const combinedInput: FoodSelectorInput = {
+      region: "punjabi",
+      dietType: "vegetarian",
+      mealCount: 5,
+      skeletonsByDay: sevenSkeletons({
+        breakfast: [
+          { exchangeType: "cereal", count: 1 },
+          { exchangeType: "fat", count: 1 },
+        ],
+        mid_morning: [{ exchangeType: "fat", count: 1 }],
+      }),
+      eligibleFoodsBySlot: {
+        breakfast: { cereal: [oats], fat: [ghee, almonds, walnut] },
+        mid_morning: { fat: [almonds, walnut] },
+      },
+    }
+    const result = fallbackSelection(combinedInput)
+    for (const day of result.days) {
+      const breakfastFat = day.meals.find((m) => m.slot === "breakfast")!.items.find((i) => i.exchangeType === "fat")!
+      const midMorningFat = day.meals.find((m) => m.slot === "mid_morning")!.items.find((i) => i.exchangeType === "fat")!
+      // Never ghee alongside oats.
+      expect(breakfastFat.foodId, `day ${day.dayIndex}`).not.toBe("ghee")
+      // Never the same nut twice in one day, since an alternative always exists here.
+      expect(midMorningFat.foodId, `day ${day.dayIndex}`).not.toBe(breakfastFat.foodId)
+    }
+  })
+
+  it("leaves non-fat exchange types (cereal) untouched — can still repeat across lunch and dinner", () => {
+    const result = fallbackSelection(lunchDinnerFatInput)
+    const anyDayCerealMatches = result.days.some((day) => {
+      const lunchCereal = day.meals.find((m) => m.slot === "lunch")!.items.find((i) => i.exchangeType === "cereal")!
+      const dinnerCereal = day.meals.find((m) => m.slot === "dinner")!.items.find((i) => i.exchangeType === "cereal")!
+      return lunchCereal.foodId === dinnerCereal.foodId
+    })
+    expect(anyDayCerealMatches).toBe(true)
+  })
+
+  it("is deterministic with same-day fat exclusion active", () => {
+    const first = fallbackSelection(lunchDinnerFatInput)
+    const second = fallbackSelection(lunchDinnerFatInput)
+    expect(first).toEqual(second)
+  })
+})
+
+describe("fallbackSelection — Omelette pairs with plain Paratha", () => {
+  const omelette = makeFood({ id: "omelette", nameEn: "Omelette", exchangeType: "meat", tags: ["pairs_with_plain_paratha"] })
+  const egg = makeFood({ id: "egg", nameEn: "Egg", exchangeType: "meat" })
+  const paratha = makeFood({ id: "paratha", nameEn: "Paratha", exchangeType: "cereal", tags: ["omelette_pairing_cereal"] })
+  const roti = makeFood({ id: "roti", nameEn: "Roti", exchangeType: "cereal" })
+  // Neutral fixture proving the match is tag-driven, not name-driven — NOT
+  // a claim about a real regional pairing. (An earlier version of this
+  // rule tagged Bajra bhakri as rajasthani's own "plain cereal" substitute;
+  // that was reverted per direct user correction — Paratha itself is made
+  // eligible in rajasthani instead, see 20260811080000.)
+  const someOtherTaggedCereal = makeFood({ id: "other-cereal", nameEn: "Some Other Cereal", exchangeType: "cereal", tags: ["omelette_pairing_cereal"] })
+  const untaggedCereal = makeFood({ id: "untagged-cereal", nameEn: "Untagged Cereal", exchangeType: "cereal" })
+
+  it("always picks plain Paratha for the cereal exchange when Omelette fills the meat exchange in the same slot", () => {
+    const input: FoodSelectorInput = {
+      region: "north_indian",
+      dietType: "eggetarian",
+      mealCount: 5,
+      skeletonsByDay: sevenSkeletons({
+        breakfast: [
+          { exchangeType: "meat", count: 1 },
+          { exchangeType: "cereal", count: 1 },
+        ],
+      }),
+      eligibleFoodsBySlot: { breakfast: { meat: [omelette], cereal: [paratha, roti] } },
+    }
+    const selection = fallbackSelection(input)
+    for (const day of selection.days) {
+      const breakfast = day.meals.find((m) => m.slot === "breakfast")!
+      expect(breakfast.items.find((i) => i.exchangeType === "cereal")!.foodId, `day ${day.dayIndex}`).toBe("paratha")
+    }
+  })
+
+  it("leaves the cereal pool unrestricted when the meat exchange is Egg, not Omelette", () => {
+    const input: FoodSelectorInput = {
+      region: "north_indian",
+      dietType: "eggetarian",
+      mealCount: 5,
+      skeletonsByDay: sevenSkeletons({
+        breakfast: [
+          { exchangeType: "meat", count: 1 },
+          { exchangeType: "cereal", count: 1 },
+        ],
+      }),
+      eligibleFoodsBySlot: { breakfast: { meat: [egg], cereal: [paratha, roti] } },
+    }
+    const selection = fallbackSelection(input)
+    const cerealIds = new Set(selection.days.map((d) => d.meals.find((m) => m.slot === "breakfast")!.items.find((i) => i.exchangeType === "cereal")!.foodId))
+    expect(cerealIds.has("roti")).toBe(true)
+  })
+
+  it("degrades to the normal cereal pool when plain Paratha isn't eligible for this slot/region — never throws", () => {
+    const input: FoodSelectorInput = {
+      region: "gujarati",
+      dietType: "eggetarian",
+      mealCount: 5,
+      skeletonsByDay: sevenSkeletons({
+        breakfast: [
+          { exchangeType: "meat", count: 1 },
+          { exchangeType: "cereal", count: 1 },
+        ],
+      }),
+      eligibleFoodsBySlot: { breakfast: { meat: [omelette], cereal: [roti] } },
+    }
+    expect(() => fallbackSelection(input)).not.toThrow()
+    const selection = fallbackSelection(input)
+    for (const day of selection.days) {
+      const breakfast = day.meals.find((m) => m.slot === "breakfast")!
+      expect(breakfast.items.find((i) => i.exchangeType === "cereal")!.foodId).toBe("roti")
+    }
+  })
+
+  it("matches by tag rather than the literal name \"Paratha\" — any food tagged omelette_pairing_cereal qualifies", () => {
+    const input: FoodSelectorInput = {
+      region: "north_indian",
+      dietType: "eggetarian",
+      mealCount: 5,
+      skeletonsByDay: sevenSkeletons({
+        breakfast: [
+          { exchangeType: "meat", count: 1 },
+          { exchangeType: "cereal", count: 1 },
+        ],
+      }),
+      eligibleFoodsBySlot: { breakfast: { meat: [omelette], cereal: [someOtherTaggedCereal, untaggedCereal] } },
+    }
+    const selection = fallbackSelection(input)
+    for (const day of selection.days) {
+      const breakfast = day.meals.find((m) => m.slot === "breakfast")!
+      expect(breakfast.items.find((i) => i.exchangeType === "cereal")!.foodId, `day ${day.dayIndex}`).toBe("other-cereal")
+    }
+  })
+
+  it("is deterministic with the Omelette-Paratha pairing active", () => {
+    const input: FoodSelectorInput = {
+      region: "north_indian",
+      dietType: "eggetarian",
+      mealCount: 5,
+      skeletonsByDay: sevenSkeletons({
+        breakfast: [
+          { exchangeType: "meat", count: 1 },
+          { exchangeType: "cereal", count: 1 },
+        ],
+      }),
+      eligibleFoodsBySlot: { breakfast: { meat: [omelette], cereal: [paratha, roti] } },
+    }
+    const first = fallbackSelection(input)
+    const second = fallbackSelection(input)
     expect(first).toEqual(second)
   })
 })

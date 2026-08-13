@@ -1,9 +1,15 @@
 import { describe, expect, it } from "vitest"
 
 import { checkArchetypeAdherence, validateSelection } from "./food-selector-validate"
+import type { Skeleton } from "./meal-distributor"
 import { makeFood } from "./test-fixtures"
 import type { ArchetypeAssignment } from "./archetype-selector"
 import type { FoodSelectorInput, Selection, SelectedDay } from "./food-selector-types"
+
+/** No jitter in these fixtures — every day gets the identical skeleton, reproducing pre-jitter behavior exactly. */
+function sevenSkeletons(skeleton: Skeleton): Skeleton[] {
+  return new Array(7).fill(skeleton)
+}
 
 const roti = makeFood({ id: "roti", nameEn: "Roti", exchangeType: "cereal" })
 const rice = makeFood({ id: "rice", nameEn: "Rice", exchangeType: "cereal" })
@@ -26,7 +32,7 @@ const input: FoodSelectorInput = {
   region: "north_indian",
   dietType: "vegetarian",
   mealCount: 5,
-  skeleton: {
+  skeletonsByDay: sevenSkeletons({
     breakfast: [
       { exchangeType: "cereal", count: 2 },
       { exchangeType: "fruit", count: 1 },
@@ -36,7 +42,7 @@ const input: FoodSelectorInput = {
       { exchangeType: "pulse", count: 1 },
       { exchangeType: "fruit", count: 1 },
     ],
-  },
+  }),
   eligibleFoodsBySlot: {
     breakfast: { cereal: CEREALS, fruit: FRUITS },
     dinner: { vegetable_a: [palak, bhindi], pulse: PULSES, fruit: FRUITS },
@@ -169,7 +175,7 @@ describe("checkArchetypeAdherence", () => {
     region: "south_indian",
     dietType: "vegetarian",
     mealCount: 5,
-    skeleton: { breakfast: [{ exchangeType: "cereal", count: 2 }, { exchangeType: "pulse", count: 0.5 }] },
+    skeletonsByDay: sevenSkeletons({ breakfast: [{ exchangeType: "cereal", count: 2 }, { exchangeType: "pulse", count: 0.5 }] }),
     eligibleFoodsBySlot: { breakfast: { cereal: [idli, dosa], pulse: [sambar, masoorDalFood] } },
   }
 

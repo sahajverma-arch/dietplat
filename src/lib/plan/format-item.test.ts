@@ -52,6 +52,27 @@ describe("formatItemQuantity", () => {
     expect(formatItemQuantity(item({ servingRawG: null, householdMeasure: "1 medium" }))).toBe("1 medium")
     expect(formatItemQuantity(item({ servingRawG: null, householdMeasure: null }))).toBe("1 portion")
   })
+
+  it("always shows a fruit's plain household measure, never substituting in the real exchange count", () => {
+    expect(
+      formatItemQuantity(item({ exchangeType: "fruit", exchangeCount: 3, servingRawG: null, householdMeasure: "1 medium" }))
+    ).toBe("1 medium")
+    expect(
+      formatItemQuantity(item({ exchangeType: "fruit", exchangeCount: 2, servingRawG: null, householdMeasure: "1 katori diced" }))
+    ).toBe("1 katori diced")
+  })
+
+  it("keeps a single fruit's household measure unchanged at exchangeCount 1", () => {
+    expect(formatItemQuantity(item({ exchangeType: "fruit", exchangeCount: 1, servingRawG: null, householdMeasure: "1 medium" }))).toBe(
+      "1 medium"
+    )
+  })
+
+  it("shows a half-exchange fruit's household measure as-is too, not just whole counts", () => {
+    expect(
+      formatItemQuantity(item({ exchangeType: "fruit", exchangeCount: 1.5, servingRawG: null, householdMeasure: "1 medium" }))
+    ).toBe("1 medium")
+  })
 })
 
 describe("formatItemLabel", () => {

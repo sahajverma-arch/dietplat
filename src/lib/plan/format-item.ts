@@ -16,6 +16,11 @@ import type { PlanViewItem } from "./plan-view-model"
  */
 const INDIVISIBLE_EXCHANGE_TYPES = new Set(["meat", "meat_lean"])
 
+// A direct dietitian request: always show a fruit's plain household measure
+// ("1 medium") regardless of its real exchange count, never substituting in
+// the count ("3 medium") the way meat/meat_lean's own carve-out below does.
+// Dry fruits (Almonds, Walnut — exchangeType "fat") are unaffected either
+// way, since they carry a real servingRawG and never reach this branch.
 export function formatItemQuantity(item: PlanViewItem): string {
   if (item.servingRawG === null) {
     return item.householdMeasure ?? "1 portion"

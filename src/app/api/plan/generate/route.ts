@@ -41,18 +41,21 @@ import {
   dietTypeFromAnswers,
 } from "@/lib/plan/client-profile-from-answers"
 import { selectArchetypesForWeek, type ArchetypeAssignment, type ArchetypeCandidate } from "@/lib/plan/archetype-selector"
+import { computeDailyPulseJitter } from "@/lib/plan/daily-macro-jitter"
 import { NoEligibleFoodsError, eligibleFoodsForSkeleton, type DishFamilyConstraintsBySlot } from "@/lib/plan/eligible-foods"
 import { solveExchanges } from "@/lib/plan/exchange-solver"
-import { distributeMeals, type MealSlotTemplate } from "@/lib/plan/meal-distributor"
+import { distributeMeals, type MealSlotTemplate, type Skeleton } from "@/lib/plan/meal-distributor"
 import { selectFoods, type AttemptLog } from "@/lib/plan/food-selector"
 import { checkArchetypeAdherence } from "@/lib/plan/food-selector-validate"
 import type { FoodSelectorInput, PreviousWeekItem } from "@/lib/plan/food-selector-types"
 import { seasonFor } from "@/lib/plan/season"
-import type { ExchangeCode } from "@/lib/plan/table-4-1"
+import { sumExchanges, type AchievedMacros, type ExchangeCode, type ExchangeCounts } from "@/lib/plan/table-4-1"
 import {
   ExchangeTypeMismatchError,
   PricedSelectionDeviationError,
   UnknownFoodError,
+  WeeklyAverageDeviationError,
+  assertWeeklyAverageWithinTolerance,
   assertWithinTolerance,
   priceSelection,
 } from "@/lib/plan/quantity"
@@ -290,14 +293,30 @@ export async function POST(request: Request) {
     )
   }
 
-  const skeleton = distributeMeals(solverResult.exchangeCounts, templates)
+  // Day-to-day macro variety (dietitian request): the week's AVERAGE protein
+  // still lands exactly on dailyTarget (solverResult already validated that
+  // within tolerance), but individual days wobble a small, bounded amount —
+  // see daily-macro-jitter.ts for why this is scoped to pulse alone and why
+  // the 7 deltas are guaranteed to sum to exactly 0.
+  const pulseJitterDeltas = computeDailyPulseJitter(solverResult.exchangeCounts.pulse, dietType, `${roadmapId}:${weekNumber}`)
+  const exchangeCountsByDay: ExchangeCounts[] = pulseJitterDeltas.map((delta) => ({
+    ...solverResult.exchangeCounts,
+    pulse: solverResult.exchangeCounts.pulse + delta,
+  }))
+  const skeletonsByDay: Skeleton[] = exchangeCountsByDay.map((counts) => distributeMeals(counts, templates))
+  // Each day's own expected achieved macros, from its own (possibly
+  // jittered) exchange counts — the correct reference for assertWithinTolerance
+  // now that days can legitimately differ from the flat weekly target.
+  const expectedAchievedByDay: AchievedMacros[] = exchangeCountsByDay.map((counts) => sumExchanges(counts))
 
   const neededSlotsByExchangeType = new Map<ExchangeCode, Set<string>>()
-  for (const [slot, items] of Object.entries(skeleton)) {
-    for (const item of items) {
-      const slots = neededSlotsByExchangeType.get(item.exchangeType) ?? new Set<string>()
-      slots.add(slot)
-      neededSlotsByExchangeType.set(item.exchangeType, slots)
+  for (const skeleton of skeletonsByDay) {
+    for (const [slot, items] of Object.entries(skeleton)) {
+      for (const item of items) {
+        const slots = neededSlotsByExchangeType.get(item.exchangeType) ?? new Set<string>()
+        slots.add(slot)
+        neededSlotsByExchangeType.set(item.exchangeType, slots)
+      }
     }
   }
 
@@ -442,7 +461,7 @@ export async function POST(request: Request) {
     region,
     dietType,
     mealCount,
-    skeleton,
+    skeletonsByDay,
     eligibleFoodsBySlot,
     dayIndexOffset,
     previousWeekLastDay,
@@ -502,12 +521,27 @@ export async function POST(request: Request) {
 
   let deviations
   try {
-    deviations = assertWithinTolerance(priced, dailyTarget)
+    deviations = assertWithinTolerance(priced, expectedAchievedByDay)
+    assertWeeklyAverageWithinTolerance(priced, dailyTarget)
   } catch (err) {
     if (err instanceof PricedSelectionDeviationError) {
       return NextResponse.json({ error: err.message, deviations: err.deviations }, { status: 500 })
     }
+    if (err instanceof WeeklyAverageDeviationError) {
+      return NextResponse.json({ error: err.message }, { status: 500 })
+    }
     throw err
+  }
+
+  // No longer identical every day (see daily-macro-jitter.ts) — the plan-
+  // level figure is the week's average across all 7 days, which is the
+  // actual clinical guarantee assertWeeklyAverageWithinTolerance() just
+  // checked, not an arbitrary single day's snapshot.
+  const weeklyAverageAchieved: AchievedMacros = {
+    kcal: priced.days.reduce((sum, d) => sum + d.achieved.kcal, 0) / priced.days.length,
+    proteinG: priced.days.reduce((sum, d) => sum + d.achieved.proteinG, 0) / priced.days.length,
+    carbsG: priced.days.reduce((sum, d) => sum + d.achieved.carbsG, 0) / priced.days.length,
+    fatG: priced.days.reduce((sum, d) => sum + d.achieved.fatG, 0) / priced.days.length,
   }
 
   const dietPlanId = await db.transaction(async (tx) => {
@@ -522,10 +556,9 @@ export async function POST(request: Request) {
         region,
         dietType,
         targets: dailyTarget,
-        // Identical every day by construction — every food within an
-        // exchange type carries the same Table 4.1 macros, so the achieved
-        // total only depends on the (fixed, per-day) exchange counts.
-        achieved: priced.days[0].achieved,
+        // Days are no longer identical (see daily-macro-jitter.ts) — this is
+        // the week's average across all 7 days, not one day's snapshot.
+        achieved: weeklyAverageAchieved,
         deviation: deviations,
         generationMode: selectionResult.generationMode,
         modelUsed: selectionResult.modelUsed,
@@ -593,8 +626,8 @@ export async function POST(request: Request) {
       season,
       weekStart: toIsoDate(weekStartDate),
       weekEnd: toIsoDate(weekEndDate),
-      achieved: priced.days[0].achieved,
-      deviation: deviations[0],
+      achieved: weeklyAverageAchieved,
+      deviations,
     },
     { status: 201 }
   )

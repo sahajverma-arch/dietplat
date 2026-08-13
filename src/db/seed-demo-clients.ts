@@ -27,12 +27,13 @@ import { db } from "./index"
 import { clients, counsellingSessions, dietPlanDays, dietPlanItems, dietPlanMeals, dietPlans, foods, mealTemplates, roadmaps } from "./schema"
 import type { Answers } from "@/lib/counselling/questions"
 import { ENGINE_VERSION, roadmapFor, weekTargets, type RoadmapInput } from "@/lib/counselling/roadmap"
+import { computeDailyPulseJitter } from "@/lib/plan/daily-macro-jitter"
 import { eligibleFoodsForSkeleton } from "@/lib/plan/eligible-foods"
 import { fallbackSelection } from "@/lib/plan/food-selector-fallback"
-import { distributeMeals, type MealSlotTemplate } from "@/lib/plan/meal-distributor"
+import { distributeMeals, type MealSlotTemplate, type Skeleton } from "@/lib/plan/meal-distributor"
 import { solveExchanges, type DietType } from "@/lib/plan/exchange-solver"
-import { assertWithinTolerance, priceSelection } from "@/lib/plan/quantity"
-import type { ExchangeCode } from "@/lib/plan/table-4-1"
+import { assertWeeklyAverageWithinTolerance, assertWithinTolerance, priceSelection } from "@/lib/plan/quantity"
+import { sumExchanges, type AchievedMacros, type ExchangeCode, type ExchangeCounts } from "@/lib/plan/table-4-1"
 
 interface DemoClient {
   name: string
@@ -195,13 +196,24 @@ async function seedOne(demo: DemoClient) {
     return
   }
 
-  const skeleton = distributeMeals(solverResult.exchangeCounts, templates)
+  // Day-to-day macro variety — see daily-macro-jitter.ts and route.ts's
+  // mirror of this same block for the full rationale.
+  const pulseJitterDeltas = computeDailyPulseJitter(solverResult.exchangeCounts.pulse, demo.dietType, `${roadmapRow.id}:1`)
+  const exchangeCountsByDay: ExchangeCounts[] = pulseJitterDeltas.map((delta) => ({
+    ...solverResult.exchangeCounts,
+    pulse: solverResult.exchangeCounts.pulse + delta,
+  }))
+  const skeletonsByDay: Skeleton[] = exchangeCountsByDay.map((counts) => distributeMeals(counts, templates))
+  const expectedAchievedByDay: AchievedMacros[] = exchangeCountsByDay.map((counts) => sumExchanges(counts))
+
   const neededSlotsByExchangeType = new Map<ExchangeCode, Set<string>>()
-  for (const [slot, items] of Object.entries(skeleton)) {
-    for (const item of items) {
-      const slots = neededSlotsByExchangeType.get(item.exchangeType) ?? new Set<string>()
-      slots.add(slot)
-      neededSlotsByExchangeType.set(item.exchangeType, slots)
+  for (const skeleton of skeletonsByDay) {
+    for (const [slot, items] of Object.entries(skeleton)) {
+      for (const item of items) {
+        const slots = neededSlotsByExchangeType.get(item.exchangeType) ?? new Set<string>()
+        slots.add(slot)
+        neededSlotsByExchangeType.set(item.exchangeType, slots)
+      }
     }
   }
 
@@ -212,10 +224,17 @@ async function seedOne(demo: DemoClient) {
     neededSlotsByExchangeType
   )
 
-  const selection = fallbackSelection({ region: demo.region, dietType: demo.dietType, mealCount: MEAL_COUNT, skeleton, eligibleFoodsBySlot })
+  const selection = fallbackSelection({ region: demo.region, dietType: demo.dietType, mealCount: MEAL_COUNT, skeletonsByDay, eligibleFoodsBySlot })
   const foodsById = new Map(allFoods.map((f) => [f.id, f]))
   const priced = priceSelection(selection, foodsById)
-  const deviations = assertWithinTolerance(priced, dailyTarget)
+  const deviations = assertWithinTolerance(priced, expectedAchievedByDay)
+  assertWeeklyAverageWithinTolerance(priced, dailyTarget)
+  const weeklyAverageAchieved: AchievedMacros = {
+    kcal: priced.days.reduce((sum, d) => sum + d.achieved.kcal, 0) / priced.days.length,
+    proteinG: priced.days.reduce((sum, d) => sum + d.achieved.proteinG, 0) / priced.days.length,
+    carbsG: priced.days.reduce((sum, d) => sum + d.achieved.carbsG, 0) / priced.days.length,
+    fatG: priced.days.reduce((sum, d) => sum + d.achieved.fatG, 0) / priced.days.length,
+  }
 
   const anchor = session.submittedAt ?? session.createdAt
   const weekStartDate = new Date(anchor)
@@ -233,7 +252,7 @@ async function seedOne(demo: DemoClient) {
       region: demo.region,
       dietType: demo.dietType,
       targets: dailyTarget,
-      achieved: priced.days[0].achieved,
+      achieved: weeklyAverageAchieved,
       deviation: deviations,
       generationMode: "fallback",
       modelUsed: null,

@@ -31,6 +31,21 @@ const VEGETABLE_EXCHANGE_TYPES: ExchangeCode[] = ["vegetable_a", "vegetable_b"]
 const SALAD_TAG = "salad"
 
 /**
+ * Pulse items are named "{Food Name} Curry" by default (see the pulse
+ * branch below) — correct for an actual dal preparation (Rajma Curry,
+ * Chana dal Curry) but wrong for a pulse-exchange food whose own name
+ * already IS the complete dish: a pancake (Besan Cheela, Moong Dal
+ * Chilla, Pesarattu), a fritter (Kothimbir Vadi, Uzhunnu Vada, Parippu
+ * Vada), a roasted snack (Bhuna Chana), or a composed meal (Misal) is
+ * never called "Besan Cheela Curry" in real usage. This only became
+ * visible once these foods gained a real, reachable slot (breakfast/
+ * evening, see meal-distributor.ts's CEREAL_FALLBACK_ONLY_SLOTS) — they
+ * existed in the dataset before that with this same wrong suffix, just
+ * never selected in practice. See table41_foods.json for the tagged foods.
+ */
+const ALREADY_NAMED_DISH_TAG = "already_named_dish"
+
+/**
  * Region -> the local word for a vegetable stir-fry/side dish.
  *
  * "Bhaji" for maharashtrian is a VERIFIED fact from this project's own
@@ -85,6 +100,9 @@ export interface ComposedGroup {
  *   naming falls out for free from the underlying food's own nameEn —
  *   e.g. a south_indian pulse food is already named "Parippu", so this
  *   produces "Parippu Curry" with no region-specific word list needed.)
+ *   Exception: a food tagged ALREADY_NAMED_DISH_TAG (a pancake, fritter,
+ *   or roasted snack whose own name already is the complete dish, e.g.
+ *   Besan Cheela) keeps its bare name — "Curry" is never appended.
  * - vegetable_a + vegetable_b items are split into two pools by the
  *   "salad" tag (see SALAD_TAG above), each pooled independently: 0 ->
  *   nothing emitted, 1 -> "{Food Name} {RegionWord}"/"{Food Name} Salad"
@@ -138,7 +156,8 @@ export function composeMealDisplay(items: PlanViewItem[], region: string): Compo
     }
 
     if (item.exchangeType === "pulse") {
-      groups.push({ kind: "single_dish", dishName: `${item.nameEn} Curry`, items: [item] })
+      const dishName = item.tags.includes(ALREADY_NAMED_DISH_TAG) ? item.nameEn : `${item.nameEn} Curry`
+      groups.push({ kind: "single_dish", dishName, items: [item] })
       continue
     }
 

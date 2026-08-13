@@ -10,7 +10,7 @@ import { Document, Page, Path, StyleSheet, Svg, Text, View } from "@react-pdf/re
 
 import { formatBmi, formatGrams, formatKcal, formatWeight } from "@/lib/format"
 import { combineDishGroups } from "@/lib/plan/dish-combination"
-import { composeMealDisplay, formatComposedGroupPlainText } from "@/lib/plan/meal-composition"
+import { composeMealDisplay, formatComposedGroupPlainText, type ComposedGroup } from "@/lib/plan/meal-composition"
 import { applyVegetableDishNames } from "@/lib/plan/vegetable-dish-naming"
 import { isMixedVegDay } from "@/lib/plan/mixed-veg-day"
 import type { PlanViewModel } from "@/lib/plan/plan-view-model"
@@ -44,6 +44,7 @@ const styles = StyleSheet.create({
   cellTime: { width: "8%", padding: 4 },
   cellMeal: { width: "10%", padding: 4, fontFamily: "Helvetica-Bold" },
   cellFoods: { width: "38%", padding: 4 },
+  cookingFatNote: { fontSize: 7, color: "#6b7280", fontStyle: "italic", marginTop: 2 },
   cellNum: { width: "8.8%", padding: 4, textAlign: "right" },
   th: { fontSize: 7, fontFamily: "Helvetica-Bold", color: "#6b7280", textTransform: "uppercase" },
   guidelineItem: { flexDirection: "row", marginBottom: 3 },
@@ -61,6 +62,19 @@ const styles = StyleSheet.create({
  */
 function pdfSafeText(text: string): string {
   return text.replace(/→/g, "->")
+}
+
+/**
+ * A dietitian asked for cooking oil/ghee to read as a light, secondary
+ * note ("Cooking fat: Mustard oil (7.5 g)") rather than sitting in the same
+ * comma-separated food list as the actual dish — it's the pan it's cooked
+ * in, not a dish in its own right. Scoped to `cooking_fat`-tagged foods
+ * specifically (Ghee, Mustard oil, ...), not nuts (untagged `fat` foods,
+ * e.g. Almonds at mid_morning) — a nut IS the snack, not a seasoning for
+ * one, so it stays in the main food list unchanged.
+ */
+function isCookingFatGroup(group: ComposedGroup): boolean {
+  return group.kind === "plain" && group.items[0].exchangeType === "fat" && group.items[0].tags.includes("cooking_fat")
 }
 
 function polarToCartesian(cx: number, cy: number, r: number, angleDeg: number) {
@@ -182,34 +196,43 @@ export function PlanPdfDocument({ model }: { model: PlanViewModel }) {
                 <Text style={[styles.cellNum, styles.th]}>Fat</Text>
                 <Text style={[styles.cellNum, styles.th]}>Cal%</Text>
               </View>
-              {day.meals.map((meal) => (
-                <View key={meal.slot} style={styles.tRow}>
-                  <Text style={styles.cellTime}>{meal.timeLabel}</Text>
-                  <Text style={styles.cellMeal}>{meal.slotLabel}</Text>
-                  <Text style={styles.cellFoods}>
-                    {applyVegetableDishNames(
-                      combineDishGroups(
-                        composeMealDisplay(meal.items, model.plan.region),
-                        meal.archetypeName,
-                        meal.archetypeDishFamilyIdsByExchangeType,
-                        model.dishCombinations,
-                        model.plan.region
-                      ),
-                      model.vegetableDishCombinations,
-                      model.vegetableDishCombinationMembers,
-                      model.plan.region,
-                      isMixedVegDay(day.dayIndex + (plan.weekNumber - 1) * 7)
-                    )
-                      .map(formatComposedGroupPlainText)
-                      .join(", ")}
-                  </Text>
-                  <Text style={styles.cellNum}>{formatKcal(meal.totals.kcal)}</Text>
-                  <Text style={styles.cellNum}>{formatGrams(meal.totals.proteinG)}g</Text>
-                  <Text style={styles.cellNum}>{formatGrams(meal.totals.carbsG)}g</Text>
-                  <Text style={styles.cellNum}>{formatGrams(meal.totals.fatG)}g</Text>
-                  <Text style={styles.cellNum}>{Math.round(meal.calPercent)}%</Text>
-                </View>
-              ))}
+              {day.meals.map((meal) => {
+                const groups = applyVegetableDishNames(
+                  combineDishGroups(
+                    composeMealDisplay(meal.items, model.plan.region),
+                    meal.archetypeName,
+                    meal.archetypeDishFamilyIdsByExchangeType,
+                    model.dishCombinations,
+                    model.plan.region
+                  ),
+                  model.vegetableDishCombinations,
+                  model.vegetableDishCombinationMembers,
+                  model.plan.region,
+                  isMixedVegDay(day.dayIndex + (plan.weekNumber - 1) * 7)
+                )
+                const cookingFatGroups = groups.filter(isCookingFatGroup)
+                const mainGroups = groups.filter((g) => !isCookingFatGroup(g))
+
+                return (
+                  <View key={meal.slot} style={styles.tRow}>
+                    <Text style={styles.cellTime}>{meal.timeLabel}</Text>
+                    <Text style={styles.cellMeal}>{meal.slotLabel}</Text>
+                    <View style={styles.cellFoods}>
+                      <Text>{mainGroups.map(formatComposedGroupPlainText).join(", ")}</Text>
+                      {cookingFatGroups.length > 0 ? (
+                        <Text style={styles.cookingFatNote}>
+                          Cooking fat: {cookingFatGroups.map(formatComposedGroupPlainText).join(", ")}
+                        </Text>
+                      ) : null}
+                    </View>
+                    <Text style={styles.cellNum}>{formatKcal(meal.totals.kcal)}</Text>
+                    <Text style={styles.cellNum}>{formatGrams(meal.totals.proteinG)}g</Text>
+                    <Text style={styles.cellNum}>{formatGrams(meal.totals.carbsG)}g</Text>
+                    <Text style={styles.cellNum}>{formatGrams(meal.totals.fatG)}g</Text>
+                    <Text style={styles.cellNum}>{Math.round(meal.calPercent)}%</Text>
+                  </View>
+                )
+              })}
               <View style={styles.tFootRow}>
                 <Text style={[styles.cellTime, { fontFamily: "Helvetica-Bold" }]} />
                 <Text style={[styles.cellMeal, { fontFamily: "Helvetica-Bold" }]}>Total</Text>

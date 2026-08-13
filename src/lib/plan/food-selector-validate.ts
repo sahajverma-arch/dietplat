@@ -32,7 +32,10 @@ export function toSelection(llm: LlmSelection): Selection {
 export function validateSelection(selection: Selection, input: FoodSelectorInput): string[] {
   const errors: string[] = []
 
-  const knownSlots = new Set(Object.keys(input.skeleton))
+  // Slot names never differ day to day — every skeletonsByDay entry comes
+  // from the same templates, only pulse's exchange count varies (see
+  // daily-macro-jitter.ts) — so day 0's slot set is representative of all 7.
+  const knownSlots = new Set(Object.keys(input.skeletonsByDay[0]))
   const dayIndexesSeen = new Set<number>()
 
   for (const day of selection.days) {
@@ -52,7 +55,7 @@ export function validateSelection(selection: Selection, input: FoodSelectorInput
       }
       slotsSeenThisDay.add(meal.slot)
 
-      const expectedItems = input.skeleton[meal.slot]
+      const expectedItems = input.skeletonsByDay[day.dayIndex][meal.slot]
       const expectedByType = new Map(expectedItems.map((i) => [i.exchangeType, i.count]))
       const actualByType = new Map<ExchangeCode, number>()
 

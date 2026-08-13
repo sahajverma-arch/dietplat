@@ -170,7 +170,7 @@ describe("buildNarrative", () => {
     expect(narrative).toContain("a dal at both main meals")
     expect(narrative).toContain("two sabzis at dinner")
     expect(narrative).toContain("fruit spread across 1 slot")
-    expect(narrative).toContain("exchange skeleton is identical on all seven days")
+    expect(narrative).toContain("week's average lands exactly on target")
   })
 })
 

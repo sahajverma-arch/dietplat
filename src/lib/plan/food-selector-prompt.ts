@@ -12,8 +12,11 @@ export const SYSTEM_PROMPT =
   "Return ONLY JSON. Never invent a food. Never output a food ID not in the provided list. " +
   "Never output quantities, calories or macros — quantities are fixed by the exchange system. " +
   "For every slot, the sum of exchangeCount you output per exchangeType must exactly equal the count given to you " +
-  "for that slot and exchangeType — you may split that count across more than one food of the same exchangeType " +
-  "if the rotation rules below ask for it, but the total must match exactly. " +
+  "for THAT DAY'S skeleton, for that slot and exchangeType — skeletonsByDay gives each of the 7 days its own " +
+  "skeleton, and a slot's exchangeType counts (most often pulse) can differ slightly from one day to the next by " +
+  "design; always use the count for the specific day you are filling, never assume every day matches day 0. You " +
+  "may split a slot's count across more than one food of the same exchangeType if the rotation rules below ask " +
+  "for it, but the total must match that day's skeleton exactly. " +
   "When a day's slot has an archetypeHint, treat it as the intended dish combination for that meal — prefer foods " +
   "whose role matches each named component, so the meal reads as that authentic dish rather than an arbitrary " +
   "combination. This is guidance, not a hard constraint — the exchange-count rules above always take priority."
@@ -29,10 +32,18 @@ export const ROTATION_RULES = [
     "Indian dish (e.g. Aloo Gobi = potato + cauliflower, Aloo Baingan = potato + brinjal) — never an arbitrary " +
     "pairing. If the two foods you'd otherwise pick don't form such a dish, choose a vegetable_b food tagged " +
     "\"salad\" instead (it renders as a separate salad, not a competing sabzi).",
-  "When a slot needs 2 or more fruit exchanges, split them across 2 different fruit foods instead of repeating one.",
+  "When a slot needs 2 or more fruit exchanges, split them across 2 different fruit foods instead of repeating one — " +
+    "EXCEPT at mid_morning, which must always use exactly ONE fruit food for its full exchange count, however large; " +
+    "never split mid_morning's fruit across two different foods.",
   "If a slot's cereal is a plain porridge (tagged \"no_cooking_fat\", e.g. Oats) rather than a fried/tempered dish " +
     "like a paratha, do not choose a cooking fat (tagged \"cooking_fat\" — ghee, oil) for that slot's fat exchange. " +
     "Pick a non-cooking-fat option instead (e.g. a nut like almonds or walnut) if one is in the eligible list.",
+  "For breakfast specifically, if the cereal is NOT tagged \"no_cooking_fat\" (i.e. it's a regular cereal like a " +
+    "paratha, not Oats), the fat exchange must be a cooking-fat food (tagged \"cooking_fat\") — never a nut. Nuts " +
+    "are reserved for mid_morning; a nut at breakfast is only correct on the no_cooking_fat carve-out above.",
+  "If a slot's meat exchange is a food tagged \"pairs_with_plain_paratha\" (Omelette), that slot's cereal exchange " +
+    "must be a food tagged \"omelette_pairing_cereal\" (plain Paratha specifically — not Roti, Aloo/Gobi/Methi " +
+    "Paratha, Oats, or any other cereal), only if such a food is in the eligible list for that slot.",
   "Prefer variety across the 7 days over repeating the same food — rotate through the eligible list.",
 ]
 
@@ -57,7 +68,8 @@ interface UserPromptPayload {
   dietType: string
   mealCount: number
   days: number
-  skeleton: Record<string, UserPromptSlotItem[]>
+  /** Index 0-6 = dayIndex — see FoodSelectorInput.skeletonsByDay. Almost always identical day to day except for a small pulse-count difference on some days (daily-macro-jitter.ts). */
+  skeletonsByDay: Record<string, UserPromptSlotItem[]>[]
   eligibleFoods: Record<string, Record<string, UserPromptFoodOption[]>>
   rotationRules: string[]
   previousWeekLastDay?: Record<string, { exchangeType: string; foodId: string; name: string }[]>
@@ -66,10 +78,13 @@ interface UserPromptPayload {
 }
 
 export function buildUserPromptPayload(input: FoodSelectorInput): UserPromptPayload {
-  const skeleton: Record<string, UserPromptSlotItem[]> = {}
-  for (const [slot, items] of Object.entries(input.skeleton)) {
-    skeleton[slot] = items.map((item) => ({ exchangeType: item.exchangeType, count: item.count }))
-  }
+  const skeletonsByDay: Record<string, UserPromptSlotItem[]>[] = input.skeletonsByDay.map((skeleton) => {
+    const daySkeleton: Record<string, UserPromptSlotItem[]> = {}
+    for (const [slot, items] of Object.entries(skeleton)) {
+      daySkeleton[slot] = items.map((item) => ({ exchangeType: item.exchangeType, count: item.count }))
+    }
+    return daySkeleton
+  })
 
   const eligibleFoods: Record<string, Record<string, UserPromptFoodOption[]>> = {}
   for (const [slot, byExchangeType] of Object.entries(input.eligibleFoodsBySlot)) {
@@ -116,7 +131,7 @@ export function buildUserPromptPayload(input: FoodSelectorInput): UserPromptPayl
     dietType: input.dietType,
     mealCount: input.mealCount,
     days: 7,
-    skeleton,
+    skeletonsByDay,
     eligibleFoods,
     rotationRules,
     previousWeekLastDay,

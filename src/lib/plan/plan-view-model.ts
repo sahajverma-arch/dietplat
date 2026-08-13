@@ -300,17 +300,20 @@ export async function loadPlanViewModel(planId: string): Promise<PlanViewModel> 
   }
 
   const targets = plan.targets as Macros
-  const deviationRaw = (plan.deviation as Array<{ kcal: number; proteinG: number; fatG: number; carbsG: number }>)[0] ?? {
-    kcal: 0,
-    proteinG: 0,
-    fatG: 0,
-    carbsG: 0,
-  }
+  // Computed from plan.achieved (the week's average across all 7 days —
+  // see route.ts) against the true prescribed target, NOT read from
+  // plan.deviation[0]: since daily-macro-jitter.ts, each stored per-day
+  // deviation is a day checked against its OWN jittered expectation (see
+  // quantity.ts's assertWithinTolerance), which is ~0 by construction and no
+  // longer means "how far this plan is from the client's actual target" —
+  // that clinical QA figure is exactly what assertWeeklyAverageWithinTolerance
+  // validates, so it's what gets shown here too.
+  const achieved = plan.achieved as Macros
   const deviationPct = {
-    kcal: deviationRaw.kcal * 100,
-    proteinG: deviationRaw.proteinG * 100,
-    fatG: deviationRaw.fatG * 100,
-    carbsG: deviationRaw.carbsG * 100,
+    kcal: (Math.abs(achieved.kcal - targets.kcal) / targets.kcal) * 100,
+    proteinG: (Math.abs(achieved.proteinG - targets.proteinG) / targets.proteinG) * 100,
+    fatG: (Math.abs(achieved.fatG - targets.fatG) / targets.fatG) * 100,
+    carbsG: (Math.abs(achieved.carbsG - targets.carbsG) / targets.carbsG) * 100,
   }
 
   const roadmapOutput = roadmap.output as RoadmapResult

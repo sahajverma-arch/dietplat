@@ -155,6 +155,18 @@ lunch," never breakfast or dinner. `milk_skim` was never an allowed exchange typ
 region until `20260810940000_milk_skim_at_lunch.sql` added it there, uniformly, the same way
 `20260810400000_no_milk_at_lunch.sql` removed `milk_cow` from lunch earlier.
 
+`milk_cow` itself has since moved again — `20260811040000_shift_milk_cow_to_dinner.sql`, a direct
+dietitian instruction, relocated it from breakfast to dinner, system-wide, every region. Since
+`milk_cow` is indivisible and resolves to the *earliest allowed* slot for the day's single 1-exchange
+total, simply adding `dinner` to its allowed slots wouldn't have moved anything — breakfast
+(`slot_order` 1) and mid_morning (2) were both still earlier than dinner (5) and still nominally
+allowed it, so it would have kept resolving to breakfast exactly as before. The fix removes
+`milk_cow` from breakfast/mid_morning/evening's `allowed_exchange_types` entirely, leaving dinner as
+the sole allowed slot — the same technique `20260810400000_no_milk_at_lunch.sql` already used to
+rule *out* a slot, now used to make dinner the *only* one left in. No conflict with `meat_lean`
+anchoring permanently to dinner too: they're independent exchange types, each resolved within its
+own needed-slots set, and `MEAT_CONFLICTING_TYPES` never touched `milk_cow` in the first place.
+
 **Vegetable_a ceiling (`NON_VEGETARIAN_VEGETABLE_A_CAP`, `exchange-solver.ts`)**: `meat_lean`
 anchoring permanently to dinner (above) means dinner *never* carries `vegetable_a`/`vegetable_b`
 (the existing `MEAT_CONFLICTING_TYPES` exclusion), so for a non-vegetarian client, lunch is the
@@ -372,6 +384,585 @@ standard preparation, unlike ghee. Scoped to Oats only, not Dalia/Upma (also fat
 breakfast archetypes) — those are legitimately still cooked with an oil tempering in real
 preparation, so forcing the same restriction onto them would have been a fabricated rule, not a
 correction.
+
+### Omelette pairs with plain Paratha
+
+A direct, repeated user instruction: whenever a slot's `meat` exchange resolves to Omelette, that
+slot's `cereal` exchange should be the literal food Paratha, every time — not a stuffed/fried dish
+(Aloo/Gobi/Methi/Paneer/Mooli Paratha), not a porridge (Oats, Dalia), and not a region-specific
+substitute. Implemented in `food-selector-fallback.ts`: `meat` resolves before `cereal` in the
+per-slot loop (`ZERO_COUNTS`'s field order, the same ordering fact `MEAT_CONFLICTING_TYPES` in
+`meal-distributor.ts` already relies on), so by the time a slot's `cereal` item is reached,
+`selectedItems` already reflects whichever `meat` food was picked — no lookahead needed. Omelette
+carries `pairs_with_plain_paratha`; when that tag is present on the slot's chosen `meat` food, the
+`cereal` pool is restricted to foods tagged `omelette_pairing_cereal` (currently Paratha only).
+
+First implemented by matching the cereal side by literal food name ("Paratha") instead of a tag,
+since only one plain-Paratha food existed in the dataset at the time. That broke the moment a real
+Rajasthani non-vegetarian plan was generated and inspected: Rajasthani's breakfast cereal pool has
+no food named "Paratha" at all (Bajra bhakri and Pyaaz Kachori instead), so the name-match filter
+always came up empty there and silently fell through to the fully unrestricted pool — an Omelette
+day and a Bajra bhakri day only *appeared* correlated in that generated plan by coincidence (both
+the meat pool and the cereal pool happened to have exactly 2 members and use the same day-indexed
+rotation formula), not because the rule was doing anything.
+
+A first attempt at fixing this generalized to a per-region "plain cereal" tag — Paratha for
+north_indian, Bajra bhakri newly added for rajasthani, on the reasoning that Bajra bhakri is
+Rajasthan's own unstuffed everyday flatbread. **Rejected on direct correction**: the user clarified
+that "plain Paratha" means the literal food, everywhere it can be made eligible, not a per-region
+stand-in. The real root cause wasn't the pairing logic at all — Paratha was simply never *eligible*
+for rajasthani, on two independent layers: its `foods.regions` was `{north_indian}` only, and even
+past that, rajasthani's own two breakfast archetypes (`rajasthani_bajra_bhakri_meal`,
+`rajasthani_pyaaz_kachori_meal`) didn't declare the `plain_paratha` dish family in their cereal
+role, so the Meal Archetype layer's weekly union would have excluded it regardless — the exact same
+class of bug already fixed once for north_indian's own archetypes (widening the cereal
+`dish_family_ids` of its five paratha/roti/dalia breakfast archetypes to also accept
+`plain_paratha`), just never carried over to rajasthani. Fixed both, widening Paratha's `regions`
+to add rajasthani and widening both
+rajasthani breakfast archetypes' cereal `dish_family_ids` to also accept `plain_paratha` — the Bajra
+bhakri tag was removed. Once eligible, Paratha also becomes a normal (non-Omelette-gated) rotation
+option for rajasthani breakfast, same as it already was for north_indian — this rule only ever
+*forces* Paratha when Omelette is present, it never excludes Paratha the rest of the time.
+
+Any other region (punjabi, gujarati, bengali, south_indian, hyderabadi, maharashtrian) still has no
+food tagged `omelette_pairing_cereal` and no archetype declaring `plain_paratha` — an Omelette there
+gracefully degrades to the unrestricted cereal pool, same as everywhere else in this file, until
+Paratha is confirmed and made eligible there too. Scoped to Omelette only, not Egg/Egg curry/Egg
+bhurji — the instruction named Omelette specifically.
+
+### Rajasthani lunch pulse variety
+
+A real generated Rajasthani plan showed only "Rajma curry" or "Gatte sabzi" at lunch, every week, no
+other pulse ever appearing. Root cause: rajasthani has exactly two active lunch archetypes
+(`rajasthani_rajma_chawal_meal`, `rajasthani_gatte_rice_meal`), and each narrows its `pulse` role to
+a single dish family (`rajma`, `gatte`). The Meal Archetype layer's weekly union (`route.ts`) is
+built only from these two archetypes' declared families, so lunch's pulse pool is capped at exactly
+`{rajma, gatte}` every week regardless of which combination gets picked which day — even though the
+`foods` table already has 5 more generic pulses eligible at rajasthani lunch (Chana dal, Toor dal,
+Masoor dal, Moong dal, Kala chana), none of which ever passed the narrowing filter. The exact same
+shape as the Omelette/plain-Paratha and Oats/Ghee bugs above: a food can be fully eligible by every
+other check and still never appear because no archetype assigned that week declared its dish family.
+
+Fixed the same way: widened `rajasthani_rajma_chawal_meal`'s `pulse` role `dish_family_ids` to also
+accept `chana_dal`, `masoor_dal`, `moong_dal`, `toor_dal`, `kadala_curry` (Kala chana's family) —
+direct precedent already existed in this dataset: `north_indian_roti_dal_meal`'s own `dal_curry`
+role already accepts 4 dal families, not 1. Widened only the generic Rajma Chawal archetype, not
+Gatte Rice Meal — Gatte ki Sabzi is Rajasthan's own uniquely named specialty (steamed gram-flour
+dumplings in a yogurt curry), and diluting a real named dish's own archetype with unrelated generic
+dals would repeat the mistake already rejected once this session for vegetable dish naming and for
+Oats. These dals are already tagged `generic` (used across every region's rotation already), so
+widening Rajma Chawal Meal to include them is not a fabricated regional claim.
+
+Sprouts (also lunch-eligible, `generic`) is NOT included: it has no `dish_family_id` at all in this
+dataset, and `eligible-foods.ts`'s narrowing filter (`f.dishFamilyId !== null && dishFamilyIds.
+includes(...)`) unconditionally excludes any food with a null family the moment any narrowing
+constraint exists for that (slot, exchangeType) — giving it a family is a separate, unrelated fix.
+
+### 2026-08-12 regional food expansion (79 new foods across all 8 regions)
+
+A direct instruction to "do more research on all regions and add more foods in all categories"
+(breakfast/lunch/evening/dinner). Before researching, counted existing region-specific coverage per
+(region, slot) — pooling in `generic`-region foods (fruit, plain dal, plain rice/roti) papered over
+just how thin real regional identity was: Gujarati had 5 breakfast / 4 lunch / 3 dinner / 1 evening
+region-specific dishes despite being one of India's richest vegetarian cuisines; Bengali, Rajasthani,
+and Hyderabadi were similarly thin; every region's breakfast/evening/mid_morning skewed almost
+entirely generic (Poha, Corn flakes, Murmura) rather than actually regional.
+
+Ran 8 parallel research passes (one per region), each given the fixed Table 4.1 serving-weight
+convention (cereal 20 g, pulse 30 g, vegetable_a 100 g, vegetable_b 50 g, fat 5 g, meat 40 g,
+meat_lean 35 g, sugar 5 g — exceptionless across the existing 137-food dataset) so the research task
+was pure culinary classification, never a nutrition estimate. Each pass returned real, named dishes
+with an exchange-type classification, jain/vegan judgment, and a confidence level, explicitly
+instructed to skip anything that doesn't cleanly map to one exchange type (mixed dishes like biryani,
+misal-with-toppings, undhiyu, shukto) rather than force a bad fit — several candidates were dropped
+this way (Gunda/Kachri ki Sabzi for rajasthani, low-confidence and more chutney than sabzi in
+practice; Avial, already handled as a curated dish combination elsewhere).
+
+79 new foods were added (137 → 216), following the same one-line-per-food schema and the same
+"UNVERIFIED — pending dietitian confirmation" convention already used for Laal Murgh/Meen Curry/Kanji
+etc. Highlights: Bengali went from 3/4/4 (breakfast/lunch/dinner) to a real repertoire (Begun Bhaja,
+Aloo Posto, Doi Begun, Dhokar Dalna, Macher Jhol, Shorshe Ilish — its fish tradition finally has named
+dishes, not just generic "Fish"); Gujarati gained its first-ever vegetable_a dishes (Ringan nu Shaak,
+Bhinda nu Shaak, Patra) plus a real repertoire of besan/rice snacks (Khaman, Fafda, Khichu, Khandvi,
+Handvo, Muthiya); Hyderabadi gained Bagara Baingan, Beerakaya Kura, Bendakaya Vepudu, and named
+meat_lean dishes (Kodi Kura, Chepala Pulusu) matching the precedent already set by south_indian's
+Meen Curry/Nadan Kozhi Curry; Rajasthani's evening slot went from zero region-specific dishes to
+Pyaaz Kachori (which also fills the food-row gap behind the pre-existing
+`rajasthani_pyaaz_kachori_meal` archetype name) and Moong Dal Kachori.
+
+**Cross-agent conflicts resolved by hand**: two agents independently proposed "Besan Cheela"/"Besan
+Chilla" for overlapping regions (north_indian, punjabi, rajasthani) with different exchange-type
+calls (pulse vs cereal) and two proposed "Mathri" (north_indian, rajasthani). Resolved to one row
+each, spanning all proposing regions — Besan Cheela as `pulse` (2 of 3 agents agreed, and it is pure
+besan/gram flour with zero grain, matching the existing Kadhi/Gatte precedent of besan-only
+preparations being modeled as a pulse exchange, not the rice-forward Dhokla precedent). Where an
+agent's own reasoning for a food's exchange type differed from this besan-as-pulse convention but was
+still internally consistent with an *existing* precedent (Gujarati's Khaman/Khandvi/Fafda/Handvo/
+Muthiya, reasoned by that agent as cereal "for consistency with the already-seeded Dhokla/Missi
+roti"), the agent's own call was kept rather than overridden by a blanket rule — both Dhokla-cereal
+and Kadhi/Gatte-pulse are legitimate existing precedents in this dataset for different reasons
+(rice-forward batter vs pure legume flour), so there wasn't one single correct answer to impose.
+
+**A real regression found and fixed during verification, not caused by this pass's research but
+surfaced by it**: reseeding after this addition made `milk_cow` (`Milk`) fail with
+`NoEligibleFoodsError` at dinner, for every region. Root cause: `20260811040000_shift_milk_cow_to_
+dinner.sql` (an earlier, uncommitted fix this same session) moved `milk_cow`'s only allowed
+`meal_templates` slot to dinner, system-wide — but never updated the `Milk` food row's own
+`mealSlots` array to include `"dinner"`, since that migration only touched `meal_templates`, not
+`foods`. The live DB had likely been hand-patched around this at the time, but `seed-foods.ts`'s
+upsert unconditionally overwrites a matching row's `mealSlots` from `table41_foods.json` on every
+run — so reseeding silently reverted that patch back to the stale JSON, breaking generation for every
+region until `table41_foods.json` itself was corrected to include `"dinner"`. A reminder that a live
+DB fix that never makes it back into the JSON source of truth is a fix that reseeding will undo.
+
+**A second, more systemic gap found while auditing every new food for reachability**: 14 of the 79
+new foods were tagged with a real-world mealSlots that `meal_templates.allowed_exchange_types` can
+never actually solve for, *system-wide, every region* — `breakfast` never allows `pulse`,
+`vegetable_a`, or `vegetable_b`; `mid_morning` allows only `fruit`/`fat`; `evening` allows only
+`fruit`/`cereal`. A besan pancake (Besan Cheela, Moong Dal Chilla, Pesarattu), a fritter
+(Kothimbir Vadi, Uzhunnu Vada, Parippu Vada, Peyaji, Aloor Chop, Beguni), a tikka starter (Paneer
+Tikka, Chicken Tikka), a full usal meal (Misal), a leaf snack (Patra), or a roasted-legume snack
+(Bhuna Chana) at its real-world breakfast/evening/mid_morning slot would have been added to the
+dataset fully correctly classified and still *never once be selectable in a generated plan* — the
+exact "eligible by every other check, invisible because a higher layer never asks for it" shape
+already documented three times above (Omelette/Paratha, Oats/Ghee, Rajasthani lunch pulse), just at
+the `meal_templates` layer instead of the archetype layer this time. Fixed by adding `lunch`/`dinner`
+to each affected food's `mealSlots` (both slots always allow `pulse`/`vegetable_a`/`vegetable_b`/
+`meat`/`meat_lean`) so every new food is genuinely reachable, while keeping the original
+breakfast/evening/mid_morning tag too where it's still the food's honest real-world occasion — this
+preserves the useful "how is this actually eaten" signal without leaving the row dead. `Paneer
+Tikka`/`Chicken Tikka` had their evening-only tag *replaced* rather than extended, since `meat`/
+`meat_lean` genuinely can't ever be assigned to `evening` and the existing Egg/Egg bhurji/Omelette/Egg
+curry precedent already shows multiple distinctly-named preparations of the same exchange type
+happily coexisting at the same lunch/dinner slots. Verified with a script auditing every one of the
+216 foods' `mealSlots` against `meal_templates`' allowed types per slot (0 fully-unreachable foods
+remain, matching before this pass too — the pre-existing dataset already tolerates some *partially*
+unreachable slots, e.g. `Sugar`'s `evening` tag, which this pass's newly-added foods now also do in
+the same harmless way), then regenerated real plans for Gujarati, Bengali, Punjabi, and Hyderabadi and
+confirmed the fixed foods (Amritsari Fish, Chicken Tikka, Makkhan, Bagara Baingan, Beerakaya Kura,
+Bendakaya Vepudu, Khakhra, Bhinda nu Shaak, Ringan nu Shaak, and others) actually appear in generated
+output, not just in the JSON.
+
+This surfaces a real open question for a dietitian, not resolved here: should `meal_templates` widen
+`breakfast` to allow `pulse` (besan pancakes are a genuine everyday breakfast) and `evening` to allow
+`pulse`/`vegetable_a`/`vegetable_b` (fritters and vadas are genuine everyday snacks)? Three independent
+regional research passes converged on real pulse-based breakfast dishes without being told about each
+other, which is a stronger signal than any one region's request — but widening a meal slot's allowed
+exchange types is a platform-wide nutritional-structure decision (it changes what every region's
+breakfast/evening *can* solve for, not just what one food is tagged with), not a data-addition
+decision, so it's flagged here rather than made unilaterally.
+
+### Day-to-day macro variety, weekly average pinned to target
+
+A direct dietitian correction on a generated plan: every one of the 7 days carried mathematically
+identical macros (`solveExchanges()` runs once per week, and the resulting exchange counts were
+applied unchanged to every day — `dietPlans.achieved` was even documented as `priced.days[0].achieved`,
+"identical every day by construction"). A real client's week doesn't look like that, and a plan that
+does reads as artificial. The fix needed to satisfy two things at once, not trade one for the other:
+the week's **average** protein must still land exactly on the prescribed target (still "THE ONE RULE
+THAT MATTERS" — nothing here lets a number drift from deterministic exchange arithmetic), while
+individual days wobble by a small, bounded amount — confirmed as a **total spread across the week**
+of about 5-7g of protein (not per-day; the gap between the best and worst day), with carbs/fat/kcal
+allowed to move too rather than being artificially pinned flat.
+
+`solveExchanges()` itself is untouched — still called once per week, exactly as before. The wobble is
+injected afterward, in `daily-macro-jitter.ts`'s `computeDailyPulseJitter()`: 7 deltas (3× `+0.5`, 3×
+`-0.5`, 1× `0`, sum exactly 0) added to the single solved `pulse` exchange count, one delta per day.
+±0.5 pulse exchange = ±3.5g protein per direction = 7g spread across the week, matching the confirmed
+band; because the deltas are exactly zero-sum, the week's average pulse count — and therefore average
+protein — is mathematically identical to the base solve's already-tolerance-checked value, not merely
+close to it. Which 3 of the 7 days go up/down is decided by a `stableHash` seeded on
+`${roadmapId}:${weekNumber}` (same small per-file hash pattern already used in `mixed-veg-day.ts` /
+`food-selector-fallback.ts` / `archetype-selector.ts`), so it's deterministic per plan but not the same
+3 weekdays for every client.
+
+**Why `pulse` and nothing else.** `milk_cow`, `milk_skim`, `meat`, `meat_lean` are documented above as
+indivisible and/or dietitian-mandated fixed floors — `milk_cow` always exactly 1 exchange; `meat`/
+`meat_lean` driven by `anchorVariantTiers()`'s tiered floor logic for non_vegetarian/eggetarian. A
+fractional day-to-day nudge on any of these would violate those invariants and risk flipping which
+tier "fits" on a given day — a much bigger, uglier swing than the 7g of protein actually asked for.
+`fat` carries no protein but has its own universal `FAT_EXCHANGE_FLOOR` (2, every diet type) with the
+identical floor-collision risk `pulse` has, for a macro nobody gave numeric requirements for. `pulse`
+is the one protein-bearing exchange type that's genuinely continuous and freely divisible, with no
+fixed floor outside `VEGAN_PULSE_FLOOR` for vegan diets (exported from `exchange-solver.ts` specifically
+so this file's floor guard can't silently drift out of sync with the solver's own number) — and it
+carries 17g carbs per exchange too, so carbs and kcal wobble along with protein for free, which is why
+a single jittered exchange type satisfies "protein wobbles, but other macros can move a little too"
+without needing a second, independent jitter mechanism.
+
+**Floor guard, graceful degradation.** If the base solved `pulse` count is too low to safely subtract
+0.5 without breaching its floor (0 for every diet type except vegan's `VEGAN_PULSE_FLOOR`),
+`computeDailyPulseJitter()` returns all-zero deltas for that one plan — today's flat behavior, not a
+forced unsafe jitter or an asymmetric non-zero-sum one. Same "degrade to the unfiltered/unjittered
+case" philosophy already used elsewhere in this file (e.g. the salad-restriction fallback in
+`food-selector-fallback.ts`).
+
+**What actually changed, mechanically.** `distributeMeals()` is now called 7 times per plan (once per
+day, each with that day's own jittered exchange counts) instead of once, producing
+`FoodSelectorInput.skeletonsByDay: Skeleton[]` instead of one shared `skeleton` — `fallbackSelection()`,
+`validateSelection()`, and the LLM prompt (`food-selector-prompt.ts`'s `skeletonsByDay` payload field)
+all index into the day-specific skeleton instead of assuming every day matches. `quantity.ts`'s
+`assertWithinTolerance()` now checks each day against *its own* expected achieved macros (from that
+day's jittered exchange counts, via `sumExchanges()`) rather than the flat weekly target — a real
+wobble day would otherwise fail every time against a target it was never meant to hit exactly; this
+stays the same "defensive, should be impossible to fail" guard it always documented itself as. The
+actual clinical guarantee lives in the new `assertWeeklyAverageWithinTolerance()`: the mean of all 7
+days' achieved macros must be within the existing 1.5% `ACCEPTANCE_FRACTION` of the true prescribed
+target — mathematically guaranteed to hold whenever the base solve was already `ok`, given the
+zero-sum property, so this is a defensive re-check too, not a new source of risk. `dietPlans.achieved`
+(DB write and the route's response body) changed from `priced.days[0].achieved` to the computed mean
+across all 7 days, and `plan-view-model.ts`'s displayed `deviationPct` now derives from that same
+weekly-average `achieved` against `targets`, rather than reading `plan.deviation[0]` — since
+per-day deviations are now checked against each day's own (deliberately moved) goalpost, day 0's
+stored deviation is ~0 by construction and no longer means "how far this plan is from the client's
+real target," which is exactly what the weekly-average figure is for.
+
+Verified against real plans, not just the golden-file tests (which are untouched — they only assert
+tolerance on `solveExchanges()`'s single-solve output, never exact exchange counts, so they pass
+unchanged): regenerated Priya's (TEST-001, vegetarian) and Rahul's (TEST-002, non_vegetarian, tier 0)
+plans and confirmed protein spans exactly the confirmed band (e.g. Rahul: 114.5g–121.5g, a 7g spread,
+weekly average 118.0g against a 118g target) while `meat`/`meat_lean`/`milk_cow` stay bit-for-bit
+identical across all 7 days in both cases — the floor/indivisibility boundary held exactly as designed.
+
+### Curd replaces milk as the default dairy exchange
+
+A direct dietitian correction: milk should not be served by default at all — curd instead, about
+300 g/day, generally split across lunch and dinner, with milk only ever coming back if a dietitian
+specifically asks for it on a given client (no such override exists yet; this just retires milk as
+the *default*). This meant reworking one of the most heavily protected fixed values in the solver —
+`MILK_COW_CAP`, previously hardcoded into every single anchor variant across every diet type — not
+just adding a food-data tag.
+
+**`exchange-solver.ts`**: `MILK_COW_CAP` changed from 1 to 0 for every diet type (vegan already
+excluded milk_cow entirely, for an unrelated "no dairy at all" reason — unaffected). In its place,
+curd's own exchange type (`milk_skim`) is now fixed at exactly 1 exchange (`MILK_SKIM_CAP`, 320 g —
+Curd's own `servingRawG`, close enough to "about 300 g/day") for every non-vegan diet type, tried
+first as a single value, not a searched range.
+
+Two designs were tried and rejected before landing on that fixed value:
+1. **Floor + wide search span** (mirroring how milk_cow/milk_skim used to share dairy duty): let the
+   cost-minimization search freely pick anywhere from 1 to 6 milk_skim exchanges. Rejected on a real
+   regeneration — for one real client's target, the solver landed on 3 exchanges (960 g curd), the
+   opposite of "only about 300 g," which is a cap, not a minimum.
+2. **Hard-fixed at exactly 1, no flexibility at all**: broke a real golden-file client (Sneha,
+   TEST-003) that used to clear tolerance specifically via milk_cow's 10 g of "free" fat — milk_skim
+   carries 0 g fat, and none of pulse/vegetables/cereal carry fat either, so for her tight ~48 g fat
+   ceiling, losing that 10 g pushed the fat-exchange residual just past Table 4.1's coarse 2.5 g grid,
+   with zero remaining flexibility anywhere to rescue it (the classic "coarse grid near-miss" already
+   documented elsewhere in this file, just newly triggered by this specific change).
+
+The shipped design fixes both problems with the two-attempt/tier machinery the solver already had,
+rather than inventing new machinery:
+- `SearchFloors` gained a `milkSkimCeiling` field: `{MILK_SKIM_CAP}` (a single value, no band) on
+  `attemptTier()`'s base attempt, `MILK_SKIM_CAP + WIDEN_STEP` (a small rescue band) on its widened
+  attempt — the same "try strict first, allow a little more only if that narrowly misses" logic
+  `vegetable_b`/`fruit` already use for the exact same coarse-grid reason.
+- `anchorVariantTiers()` now appends one **milk-rescue tier** per diet type (except vegan) at the very
+  end of its tier list — an exact copy of every existing curd-only tier with `milk_cow` restored to
+  `MILK_COW_RESCUE` (1) instead of `MILK_COW_CAP` (0). Every curd-only tier, across both floor widths,
+  is exhausted first; milk is the absolute last resort, never preferred over a looser curd-only
+  egg/meat combination. This is what actually rescues Sneha's case — the widened milk_skim band alone
+  doesn't help her (milk_skim carries 0 fat, so no amount of it fixes a fat shortfall), only milk_cow's
+  fat contribution does.
+
+**`meal-distributor.ts`**: `milk_skim` was removed from `INDIVISIBLE_TYPES`. It used to share the same
+"whole day's count goes to one slot" treatment as `milk_cow` and `meat`/`meat_lean`, but that was only
+ever exercised by Raita/Chaach, which were lunch-only foods anyway (nothing to split, so it was moot).
+Once curd became eligible at both lunch and dinner with a real per-meal serving size, that same
+indivisible treatment started producing a wrong result: dumping the whole day's 320 g into whichever
+slot happened to be earliest-allowed, confirmed on a real generated plan landing 100% at breakfast.
+`milk_skim` now proportions across its allowed slots by `kcal_share` like any ordinary exchange type —
+160 g at lunch and 160 g at dinner are both completely normal curd servings, unlike milk_cow's
+"half a glass" problem that justified the indivisible treatment in the first place. `milk_cow` itself
+stays indivisible (unaffected — it's essentially never solved for now anyway, only in the rescue tier).
+
+**Two migrations** complete the "lunch and dinner, never breakfast" placement, mirroring the exact
+`array_append`/`array_remove` technique `20260810400000_no_milk_at_lunch.sql` and
+`20260811040000_shift_milk_cow_to_dinner.sql` already established:
+`20260811100000_milk_skim_at_dinner.sql` adds `milk_skim` to dinner's `allowed_exchange_types` (it was
+lunch-only before, back when it only ever absorbed milk_cow's overflow); `20260811110000_remove_milk_
+skim_from_breakfast.sql` removes it from breakfast, where it had been eligible since the original
+exchange system design but is no longer wanted now that curd is the day's primary dairy exchange
+rather than a top-up. Curd's own `mealSlots` in `table41_foods.json` was narrowed to `["lunch",
+"dinner"]` (dropping breakfast) to match — "Skim milk" (a different, still-breakfast-eligible
+milk_skim food) is unaffected and keeps its own breakfast/evening/bedtime role.
+
+Verified end-to-end on real plans, not just unit tests: regenerated Priya's (TEST-001, vegetarian) and
+Sneha's (TEST-003, eggetarian) real plans — both land on 320 g curd/day (1 milk_skim exchange), zero
+milk, split 160 g/160 g across lunch and dinner (rotating between Curd and Raita, both genuine curd
+preparations), never at breakfast. Sneha's real week-1 target didn't even need the milk-rescue tier
+(her actual computed target differs slightly from the literal numbers hardcoded in the unit test,
+landing on a different, solvable grid alignment) — confirming the rescue tier is a true rare-case
+safety net, not something that fires on ordinary generation.
+
+### mid_morning never splits fruit across two foods
+
+A dietitian hard rule: mid_morning must always carry exactly ONE fruit food, however many fruit
+exchanges land there — a bigger mid_morning fruit need means a bigger serving of that same fruit,
+never a second, different fruit alongside it. This runs directly against the *general* fruit rule
+already documented above ("fruit keeps its 2-item split" once a slot's count reaches 2 — the one
+part of the original Deepak/Anjali-grounded splitting behavior that survived the vegetable_a/b
+reversal): breakfast and evening still split a 2+-exchange fruit requirement across two different
+fruits exactly as before, mid_morning now doesn't.
+
+Implemented as a slot-scoped exception, not a change to the general rule: `food-selector-fallback.ts`'s
+`isFruitSplit` check gained `&& !NO_FRUIT_SPLIT_SLOTS.has(slot)` (a new one-entry set, `{mid_morning}`)
+alongside its existing count/pool-size conditions — a mid_morning fruit item simply falls through to
+the generic single-food branch already used for every non-special exchange type, which naturally
+gives the food its item's full exchange count instead of splitting it in two.
+`food-selector-prompt.ts`'s `ROTATION_RULES` LLM-facing text carries the same exception, so the AI
+path and the deterministic fallback path can't disagree about which slot this applies to.
+
+**Follow-up correction — necessary but not sufficient**: a real generated plan still showed fruit
+three separate times in one day (Apple + Papaya at breakfast, Guava at mid_morning, Papaya again at
+evening). The fix above only stopped the split WITHIN mid_morning — it never addressed fruit ALSO
+being *allowed* at breakfast and evening (`meal_templates.allowed_exchange_types`), which is where
+`distributeMeals()` was still proportioning a share of the day's fruit regardless, and where
+`food-selector-fallback.ts`'s own (unrelated, still-active) 2-item split then put two *different*
+fruits at breakfast on top of that. The dietitian's actual rule was broader than first implemented:
+one fruit food, in one meal, per day — full stop, not "one fruit per meal but still multiple meals."
+`20260811120000_fruit_only_at_mid_morning.sql` removes `fruit` from breakfast's and evening's
+`allowed_exchange_types` (same `array_remove` technique as the milk migrations above), leaving
+mid_morning as fruit's sole eligible slot system-wide — the solver's existing proportional split
+then trivially puts 100% of the day's fruit there, and the earlier NO_FRUIT_SPLIT_SLOTS fix ensures
+it lands as one food, not two.
+
+This surfaced a real, previously-latent display quirk: `format-item.ts` shows fruit's `householdMeasure`
+verbatim ("1 medium") because fruit has no computed `servingRawG` to pair a gram figure with —
+harmless while a food's own per-slot fruit count stayed near 1 (which the old 2-way split kept true
+by construction), but consolidating a whole day's fruit into one food regularly produces a count of
+3-5+, while the display still always read "1 medium" regardless of that real count. A first attempt
+substituted the real count into the phrase ("3 medium", mirroring meat/meat_lean's own "2, 80 g"
+`INDIVISIBLE_EXCHANGE_TYPES` carve-out) — reverted on direct dietitian correction: fruit's household
+measure should always read "1 medium", never substituting in the exchange count, regardless of how
+many exchanges the day's single fruit item actually carries. Dry fruits (Almonds, Walnut —
+exchangeType `fat`, not `fruit`) were never affected either way, since they carry a real
+`servingRawG` and show a plain gram figure, not a household measure.
+
+Verified on a real regenerated plan: every day shows exactly one fruit food, only at mid_morning,
+with its real (now often 3-5) exchange count still stored and priced correctly — only the displayed
+household-measure text is now always "1 medium", never substituted — confirmed directly from the DB
+before re-exporting the PDF.
+
+### Realistic per-meal portions — pulse and cereal
+
+A direct dietitian complaint, backed by a real generated plan: "Aloo Paratha 10 g" at breakfast and
+"Moong dal 120 g" at dinner — both structurally impossible as real single-meal servings, not just
+unusual ones. Root-caused to one shared cause, traced with a research table (below) before touching
+any code, per the explicit request to ground the fix rather than guess.
+
+**Root cause.** Removing `milk_cow` (see "Curd replaces milk as the default dairy exchange" above)
+took away ~8 g of protein a day that used to come "for free." With curd capped at a small fixed
+amount, `pulse` — searched with no realistic ceiling (`PULSE_SEARCH_SPAN`, previously 8, i.e. no
+effective limit: 240 g raw dal/day) — became the cost search's cheapest remaining lever to close that
+gap, landing on 7.5-8.5 exchanges/day (225-255 g), split ~evenly into two ~120 g single-meal servings.
+The same oversized pulse ALSO starved `cereal`'s own residual computation (pulse's 17 g carbs/exchange
+was already covering most of the carbs target), rounding cereal down to 0.5 exchanges (10 g, less
+than one roti) — one root cause, two visible symptoms.
+
+**Reference table** (Table 4.1 exchange → realistic single-meal serving, built before designing the
+fix):
+
+| Exchange type | Raw g/exchange | Real 1-exchange equivalent | Realistic per meal | Bug found |
+|---|---|---|---|---|
+| cereal | 20 | 1 roti | 1-5 exchanges (never &lt;1 when present) | 0.5 exchange (10 g) |
+| pulse | 30 | 1 katori dal | 1-2 exchanges (60 g is already a big bowl) | 4-4.5 exchanges/meal (120-135 g) |
+| vegetable_a/b, fat, milk_skim | — | — | — | none found — already realistic |
+
+**The fix, and why it took several iterations to land.** `PULSE_SEARCH_SPAN` dropping straight to a
+"realistic" 4 broke a real golden client (Sneha, TEST-003): her eggetarian tier 1 (a single egg,
+trading lower egg-protein for more pulse — see `anchorVariantTiers()`'s own comment) genuinely needs
+6 exchanges to clear tolerance on her exact historical numbers, confirmed by instrumenting every
+tier's own search individually rather than guessing at the right number. `PULSE_SEARCH_SPAN` is 6,
+not 4 — the empirically-verified minimum that keeps every golden client (and every real regenerated
+plan checked this session) solvable, still a large real improvement over the original unbounded 8.
+6 exchanges/day split across lunch and dinner is ~90 g raw dal/meal in practice — smaller than the
+120-135 g bug, though not quite the idealized 60 g ceiling, because Sneha's exact numbers are the
+binding constraint. This is an honest, documented trade-off, not a rounding of the actual bug away.
+
+A companion attempt — flooring cereal's own residual at a fixed minimum (6 exchanges/day) — was tried
+and rejected: it broke Sneha's target in the *opposite* direction (her real, correct solution has
+*zero* cereal exchanges; forcing 6 pushed her carbs 26% over target). Cereal's residual has no daily
+floor for the same reason fat and cereal were never floored before — some genuinely low-carb targets
+have little or no cereal need, and that's correct, not a bug to paper over with a flat number.
+
+The part of the bug a solver-level fix couldn't reach — a *small but nonzero* cereal total (like
+0.5 exchanges) still being proportionally split across all 4 allowed slots, giving every single one
+an unservable fragment — was fixed one layer down instead, in `meal-distributor.ts`:
+`MIN_VIABLE_SERVING` (currently just `{cereal: 1}`) and `slotsMeetingMinimumServing()` drop the
+lowest-`kcal_share` slot(s) from a type's allowed set until the remaining slots' even proportional
+share would clear the minimum, or until only one slot is left — concentrating a small total into
+fewer, real servings instead of thinning it across every slot. Scoped to cereal only (the reported
+bug); vegetable_a/vegetable_b/fat weren't part of the complaint and their own per-meal amounts were
+already realistic on inspection, so extending this further would be an unverified generalization.
+
+Verified against all four golden clients (unchanged, still passing) and two real regenerated plans:
+pulse per meal dropped from 120-135 g to 75-105 g, and a small cereal total now lands as one real
+(if occasionally modest) serving in a single meal instead of a sub-1-exchange fragment repeated
+across four.
+
+A follow-up, narrower fix for the case where the raw carbs residual is small but genuinely
+*positive* — rounds to e.g. 0.5 exchanges rather than landing at exactly 0 — sits in
+`exchange-solver.ts` itself: `CEREAL_FLOOR_WHEN_WANTED` (4) is applied to `neighboringHalfSteps()`'s
+own floor argument only when `rawCereal > 0`, giving `slotsMeetingMinimumServing()` enough of a
+total to keep all 4 cereal-eligible slots above its 1-exchange minimum rather than dropping any of
+them. When the raw residual is at or below 0 (cereal genuinely not needed at all, Sneha's own case),
+the floor stays 0 — the same "only floor a value that's genuinely wanted, never force one that
+should be zero" pattern used throughout this section, just applied one level up from
+`meal-distributor.ts`'s own slot-dropping logic.
+
+### breakfast and evening can never be structurally empty
+
+A direct dietitian correction: "we can't leave breakfast and evening blank." Root cause, found by
+inspecting a real generated plan directly from the DB: `cereal` is a pure carbs residual
+(`exchange-solver.ts`) and can legitimately solve to exactly 0 for a real client target — not a bug,
+already true of Sneha's own golden case (TEST-003) before this session even started. But
+`evening`'s `meal_templates.allowed_exchange_types` was `['cereal']` and *nothing else* — whenever
+cereal was 0, evening had structurally nowhere to put anything, every day of that client's week.
+Vegetarian breakfast (`['cereal', 'meat', 'fat', 'sugar']`, `meat` always 0 for a vegetarian client)
+degraded to a single "Ghee 15 g" line — technically nonzero, not a real meal.
+
+This wasn't unique to one client — any target whose correct answer is cereal=0 hits it, confirmed on
+both a real Punjabi vegetarian client (this session) and, separately, on Sneha's own eggetarian
+golden target when run past week 1. A flat cereal floor was already tried and rejected earlier in
+this same section for breaking her zero-cereal correctness in the opposite direction, so the fix
+had to live at the meal-slot-eligibility layer, not the solver.
+
+`20260812130000_pulse_at_breakfast_and_evening.sql` widens both slots' `allowed_exchange_types` to
+include `pulse` — chosen because real pulse-exchange foods for exactly this occasion already existed
+in the dataset from the 2026-08-12 regional expansion (Besan Cheela, Moong Dal Chilla, Pesarattu,
+Bhuna Chana, Misal, Kothimbir Vadi, Uzhunnu Vada, Parippu Vada) but were never reachable there — the
+same "eligible by every other check, invisible because a higher layer never asks for it" shape
+already fixed three times over for Omelette/Paratha, Oats/Ghee, and Rajasthani lunch pulse, just
+surfacing again one layer up. This closes an open question flagged, not resolved, in this same
+file's "2026-08-12 regional food expansion" section.
+
+Widening the allowed-types list alone would have been too blunt, though: `distributeMeals()`
+proportionally splits *any* nonzero exchange type across every slot that allows it, regardless of
+whether that slot already has something else covering the same need — so a normal week (cereal
+nonzero) would put a besan-cheela item at breakfast/evening *alongside* an already-complete
+paratha/roti, verified as a real regression on Priya's (TEST-001) own week-1 target ("Moong Dal
+Chilla 30 g, Methi Paratha 40 g, Ghee 12.5 g" at breakfast — two starches crowding one meal that
+used to have one). `meal-distributor.ts`'s `CEREAL_FALLBACK_ONLY_SLOTS` (`{breakfast, evening}`)
+closes this: when `counts.cereal > 0` for the week, pulse is excluded from these two slots'
+candidate list — the same conditional-exclusion shape as `MEAT_CONFLICTING_TYPES`, just keyed off
+the week's cereal total instead of a same-slot meat item, and with the same "only exclude if a
+slot actually remains" guard (moot here, since lunch/dinner always still allow pulse).
+
+A second, independent display bug surfaced once these pulse foods actually became reachable for the
+first time: `meal-composition.ts` unconditionally renders every pulse item as `"{Food Name} Curry"`
+— correct for an actual dal preparation (Rajma Curry, Chana dal Curry) but wrong for a food whose own
+name already *is* the complete dish ("Besan Cheela Curry" is not a real dish). This tag/name mismatch
+existed in the dataset since the regional expansion but was invisible until now, since none of these
+foods could previously be selected at all. Fixed with a new `already_named_dish` tag (Besan Cheela,
+Moong Dal Chilla, Pesarattu, Bhuna Chana, Misal, Kothimbir Vadi, Uzhunnu Vada, Parippu Vada — every
+pancake/fritter/roasted-snack pulse food currently in the dataset) that `composeMealDisplay()` checks
+before appending "Curry", keeping the food's bare name instead — the same tag-driven pattern as
+`salad`/`cooking_fat`/`no_cooking_fat` elsewhere in this file.
+
+Verified end-to-end on real regenerated plans, not just unit tests: riya's (Punjabi vegetarian,
+zero-cereal week) breakfast now shows "Besan Cheela (45 g)" with Ghee alongside it, and evening
+shows the same dish alone, every day of the week, weekly-average macros still landing within
+tolerance of target (1.06% on the worst macro). Priya's (TEST-001) own week-1 target (cereal=8, a
+normal week) confirmed unaffected — breakfast and evening are back to a single cereal-based dish
+each, no pulse item alongside it.
+
+### 2026-08-12 pulse-breakfast/evening regional expansion (10 new foods, 2 widened)
+
+The fix above unblocked breakfast/evening *structurally*, but auditing every region afterward found
+the actual food-level coverage was wildly uneven — Besan Cheela (`regions: [north_indian, punjabi,
+rajasthani]`) was the ONLY pulse food eligible at Punjabi/Rajasthani breakfast or evening, so it
+appeared every single day with zero rotation (a direct dietitian complaint: "only besan chilla is
+added"), and Gujarati/Bengali had ZERO pulse foods tagged for either slot at all — meaning a
+Gujarati or Bengali client whose target genuinely needs no cereal would still hit the exact blank-
+slot bug the migration above was meant to fix, just for a different reason (no eligible food, not
+no eligible slot).
+
+Ran 7 parallel research passes (one per region needing it — north_indian already had 2 breakfast/3
+evening options, skipped), each given the same constraint set: a real, named dish (a pancake,
+fritter, or roasted/dry snack whose own name is already the complete dish — never a wet dal curry,
+those already exist for lunch/dinner), built primarily from a pulse/legume/besan base (not
+rice/wheat-forward), a genuine breakfast and/or evening tea-time occasion, and no duplication of
+anything already seeded for that region. Each pass was explicitly told to report fewer dishes (or
+zero) rather than force a bad fit, and to flag jain/vegan fitness and confidence level per dish
+rather than assume it.
+
+**Result, 10 new foods across 6 regions:**
+- **Gujarati** (0 → 2): Ganthiya (breakfast+evening, deep-fried besan-strand farsan, jain/vegan by
+  default) and Chorafali (evening, urad-dal-flour crisps, jain/vegan; minor caveat — some recipes
+  fold in a small amount of rice flour alongside the dal flour for crispness).
+- **Bengali** (0 → 2): Ghugni (breakfast+evening, dried-yellow-pea preparation, a genuine Kolkata
+  street/tiffin staple; standard recipe has onion/ginger so NOT tagged jain here, though a named
+  onion-garlic-free festival variant — Niramish Ghugni — exists for a future separate row) and Daler
+  Bora (evening, ground masoor dal fritter, vegan but not jain — no onion-garlic-free variant found).
+- **Rajasthani** (evening: 1 → 4): Bikaneri Bhujia (moth-bean/besan namkeen strands, jain/vegan in
+  the traditional recipe — some commercial brands add garlic powder) and Moong Dal Pakoda (ground
+  moong dal fritter, vegan; a jain variant is documented but not confirmed as the default, so not
+  tagged jain pending a dietitian call).
+- **Hyderabadi** (1 → 3 at both slots): Pesara Garelu (moong dal vada, distinct from the already-
+  seeded Pesarattu crepe) and Minapa Garelu (urad dal vada — the genuine Telugu/Andhra regional name
+  for the same preparation already seeded as south_indian's "Uzhunnu Vada," same alias convention as
+  Poli/Toop/Bhaji). Both vegan; onion is the common default in published recipes for both, so neither
+  is tagged jain.
+- **Maharashtrian** (breakfast: 1 → 2): Besan Dhirde — the Marathi name/alias for the same
+  preparation as Besan Cheela, same alias convention as above; traditional recipe (used for religious
+  naivedhyam offerings) is onion-and-garlic-free, so jain/vegan.
+- **South Indian** (breakfast: 1 → 2): Hesaru Bele Dose — Karnataka's own name for a pure moong-dal
+  dosa (no rice, no fermentation), the standalone-dish counterpart to Sambar's side-curry role; the
+  region's own alias of the Pesarattu/Pesara Garelu/Minapa Garelu dish family. No onion/garlic in any
+  recipe found; jain/vegan (ginger is present but trivially omittable without changing the dish).
+
+**2 widened, no new rows needed** — the cleanest fix in this whole pass, because the food already
+existed: Moong Dal Chilla and Bhuna Chana were seeded for `north_indian` only, but research confirmed
+both are genuinely Punjabi dishes too (multiple sources name Moong Dal Chilla directly as Punjabi,
+not just generic north Indian) and Bhuna Chana's dry-roasted-chana tradition spans the whole Hindi
+belt Punjab and Rajasthan sit within. `regions` widened to `[north_indian, punjabi]` and `[north_
+indian, punjabi, rajasthani]` respectively — same technique as Paratha's own rajasthani-region
+widening for the Omelette-pairing fix above.
+
+All 10 new rows follow the existing schema exactly: `pulse`, 30 g raw per exchange, `already_named_
+dish` tag (so `meal-composition.ts` doesn't wrongly append "Curry" to a pancake/fritter/snack name —
+see the naming-bug fix above), `mealSlots` scoped honestly to whichever occasion the research
+actually supported (several are evening-only because the breakfast claim was too weak to include —
+e.g. Chorafali, Bikaneri Bhujia, Moong Dal Pakoda, Daler Bora), plus lunch/dinner for reachability
+matching every other besan-snack row's own precedent, and a `notes` field carrying the confidence
+level and any caveat, ending "UNVERIFIED — pending dietitian confirmation."
+
+Rejected candidates, for traceability (not seeded): Besan Pudla (often blended with rava/vegetables,
+not a clean single exchange), Sev (more a garnish/mixing ingredient than a standalone plated dish),
+Zunka/Jhunka (Maharashtrian, real and cleanly pulse, but breakfast is a secondary occasion to lunch/
+dinner, not primary), Cherupayar Dosa (Kerala, real dish but commonly made with rice and/or shallots
+— composition too recipe-dependent to call clean pulse), Adai/Uddina Dosa/Ulundu Dosai (all
+genuinely rice-forward or contradictory on composition), Sunnundalu (jaggery/ghee-forward, a sweet,
+not a clean pulse exchange), Mirchi Vada/Pyaaz Pakoda/Bread Pakora (all genuinely mixed-exchange-type
+dishes), Punugulu/Chegodilu (rice-flour-forward), Sundal (real, but its occasion is evening snack/
+prasadam, not breakfast), Khichiya Papad (a meal accompaniment, not standalone), Dal-Moth/Chana Jor
+Garam (multi-ingredient mixtures or weak on regional grounding).
+
+Verified end-to-end on real regenerated plans: riya's roadmap re-solved at region=gujarati and
+region=bengali (both landing on the same zero-cereal target already established above) now shows
+Ganthiya at breakfast / Chorafali at evening, and Ghugni at breakfast / Daler Bora at evening,
+respectively — both regions' first-ever non-blank pulse-fallback breakfast/evening. A fresh Punjabi
+regeneration confirms real day-to-day rotation for the first time: breakfast alternates Besan
+Cheela/Moong Dal Chilla, evening alternates Besan Cheela/Bhuna Chana — resolving the original "only
+besan chilla is added" complaint. Full suite still 334/335 (same pre-existing, unrelated DB-
+connectivity failure).
+
+### Dalia added to Punjabi breakfast
+
+A direct dietitian request: "add dalia also in breakfast options." Dalia (broken-wheat porridge)
+was seeded `regions: ['north_indian']` only, and punjabi's own breakfast archetype list had no
+porridge option at all — same "eligible by every other check, invisible because the region tag /
+archetype union never reaches it" shape as Paratha's earlier rajasthani widening and the Rajasthani
+lunch pulse fix. Fixed the same way: widened Dalia's `regions` to add `punjabi` (both are wheat-belt
+regions where daliya is an everyday breakfast, not a fabricated regional claim) and added
+`punjabi_dalia_meal` (`20260812140000_dalia_in_punjabi_breakfast.sql`), mirroring
+`north_indian_dalia_meal` exactly — one required cereal component, no fat component (a porridge
+isn't conventionally topped with ghee the way a paratha is, same reasoning already established for
+Oats/Dalia/Upma above). Verified by loading punjabi's real breakfast archetype candidates from the
+DB and running `selectArchetypesForWeek` across 30 simulated weeks: `punjabi_dalia_meal` lands on
+48/210 breakfast-days (~23%), rotating alongside the paratha varieties and the already-seeded
+`punjabi_oats_meal`, not starved out by their higher authenticity scores.
 
 ## Rounding & precision
 - All intermediate maths unrounded. Round only at display.

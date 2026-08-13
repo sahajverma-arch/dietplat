@@ -8,11 +8,11 @@ import { ZERO_COUNTS } from "./table-4-1"
  * 20260808200000_classic_table41_exchange_system.sql — keep in sync.
  */
 const NORTH_INDIAN_TEMPLATES: MealSlotTemplate[] = [
-  { slot: "breakfast", slotOrder: 1, kcalShare: 0.22, allowedExchangeTypes: ["cereal", "milk_cow", "milk_skim", "meat", "fruit", "fat", "sugar"] },
+  { slot: "breakfast", slotOrder: 1, kcalShare: 0.22, allowedExchangeTypes: ["cereal", "milk_cow", "meat", "fruit", "fat", "sugar"] },
   { slot: "mid_morning", slotOrder: 2, kcalShare: 0.07, allowedExchangeTypes: ["fruit", "milk_cow", "fat"] },
-  { slot: "lunch", slotOrder: 3, kcalShare: 0.26, allowedExchangeTypes: ["cereal", "pulse", "vegetable_a", "vegetable_b", "meat", "meat_lean", "fat", "milk_cow"] },
+  { slot: "lunch", slotOrder: 3, kcalShare: 0.26, allowedExchangeTypes: ["cereal", "pulse", "vegetable_a", "vegetable_b", "meat", "meat_lean", "fat", "milk_cow", "milk_skim"] },
   { slot: "evening", slotOrder: 4, kcalShare: 0.19, allowedExchangeTypes: ["fruit", "fat", "milk_cow", "cereal"] },
-  { slot: "dinner", slotOrder: 5, kcalShare: 0.26, allowedExchangeTypes: ["cereal", "pulse", "vegetable_a", "vegetable_b", "meat", "meat_lean", "fat"] },
+  { slot: "dinner", slotOrder: 5, kcalShare: 0.26, allowedExchangeTypes: ["cereal", "pulse", "vegetable_a", "vegetable_b", "meat", "meat_lean", "fat", "milk_skim"] },
 ]
 
 function totalOf(skeleton: ReturnType<typeof distributeMeals>, exchangeType: string): number {
@@ -79,7 +79,7 @@ describe("distributeMeals — Deepak Sharma's real decoded skeleton", () => {
   })
 })
 
-describe("distributeMeals — meat, meat_lean, milk_cow, milk_skim are indivisible, never split across slots", () => {
+describe("distributeMeals — meat, meat_lean, milk_cow are indivisible, never split across slots", () => {
   it("puts the full meat (egg) count in one slot, not fractioned across several", () => {
     const counts: ExchangeCounts = { ...ZERO_COUNTS, meat: 2, cereal: 4 }
     const skeleton = distributeMeals(counts, NORTH_INDIAN_TEMPLATES)
@@ -114,12 +114,52 @@ describe("distributeMeals — meat, meat_lean, milk_cow, milk_skim are indivisib
     expect(slotsWithMilk[0][1].find((i) => i.exchangeType === "milk_cow")?.count).toBe(1)
   })
 
-  it("puts the full milk_skim count in one slot", () => {
+})
+
+describe("distributeMeals — cereal consolidates into fewer slots rather than fragmenting below 1 exchange", () => {
+  it("puts a small total into a single slot instead of splitting it into sub-1-exchange fragments across all 4 allowed slots", () => {
+    const counts: ExchangeCounts = { ...ZERO_COUNTS, cereal: 1 }
+    const skeleton = distributeMeals(counts, NORTH_INDIAN_TEMPLATES)
+    const slotsWithCereal = Object.entries(skeleton).filter(([, items]) => items.some((i) => i.exchangeType === "cereal"))
+    expect(slotsWithCereal).toHaveLength(1)
+    expect(slotsWithCereal[0][1].find((i) => i.exchangeType === "cereal")?.count).toBe(1)
+    expect(totalOf(skeleton, "cereal")).toBe(1)
+  })
+
+  it("still splits normally across every allowed slot once the total is large enough for each to get a full exchange", () => {
+    const counts: ExchangeCounts = { ...ZERO_COUNTS, cereal: 8 }
+    const skeleton = distributeMeals(counts, NORTH_INDIAN_TEMPLATES)
+    const slotsWithCereal = Object.entries(skeleton).filter(([, items]) => items.some((i) => i.exchangeType === "cereal"))
+    expect(slotsWithCereal).toHaveLength(4)
+    for (const [, items] of slotsWithCereal) {
+      expect(items.find((i) => i.exchangeType === "cereal")!.count).toBeGreaterThanOrEqual(1)
+    }
+    expect(totalOf(skeleton, "cereal")).toBe(8)
+  })
+
+  it("never applies this consolidation to other exchange types (e.g. fat) — scoped to cereal only", () => {
+    const counts: ExchangeCounts = { ...ZERO_COUNTS, fat: 1, cereal: 8 }
+    const skeleton = distributeMeals(counts, NORTH_INDIAN_TEMPLATES)
+    const slotsWithFat = Object.entries(skeleton).filter(([, items]) => items.some((i) => i.exchangeType === "fat"))
+    // fat is allowed at breakfast/mid_morning/lunch/evening/dinner (5 slots) in this fixture —
+    // a total of 1 would give each well under 1 exchange, but that's unaffected by MIN_VIABLE_SERVING.
+    expect(slotsWithFat.length).toBeGreaterThan(1)
+  })
+})
+
+describe("distributeMeals — milk_skim (curd) proportions across lunch and dinner, deliberately NOT indivisible", () => {
+  it("splits the day's milk_skim count across both lunch and dinner instead of dumping it all in one slot", () => {
     const counts: ExchangeCounts = { ...ZERO_COUNTS, milk_skim: 1, cereal: 4 }
     const skeleton = distributeMeals(counts, NORTH_INDIAN_TEMPLATES)
     const slotsWithMilkSkim = Object.entries(skeleton).filter(([, items]) => items.some((i) => i.exchangeType === "milk_skim"))
-    expect(slotsWithMilkSkim).toHaveLength(1)
-    expect(slotsWithMilkSkim[0][0]).toBe("breakfast")
+    expect(slotsWithMilkSkim.map(([slot]) => slot).sort()).toEqual(["dinner", "lunch"])
+    expect(totalOf(skeleton, "milk_skim")).toBe(1)
+  })
+
+  it("never places milk_skim at breakfast — curd is a lunch/dinner exchange only", () => {
+    const counts: ExchangeCounts = { ...ZERO_COUNTS, milk_skim: 1, cereal: 4 }
+    const skeleton = distributeMeals(counts, NORTH_INDIAN_TEMPLATES)
+    expect(skeleton.breakfast.some((i) => i.exchangeType === "milk_skim")).toBe(false)
   })
 })
 

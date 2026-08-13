@@ -131,6 +131,13 @@ describe("composeMealDisplay — pulses never merge with each other or with vege
     const groups = composeMealDisplay([parippu], "south_indian")
     expect(formatComposedGroupPlainText(groups[0])).toBe("Parippu Curry (15 g)")
   })
+
+  it("a pulse food tagged already_named_dish keeps its bare name — no 'Curry' appended", () => {
+    const besanCheela = makeItem({ nameEn: "Besan Cheela", exchangeType: "pulse", servingRawG: 30, tags: ["already_named_dish"] })
+    const groups = composeMealDisplay([besanCheela], "punjabi")
+    expect(groups[0].dishName).toBe("Besan Cheela")
+    expect(formatComposedGroupPlainText(groups[0])).toBe("Besan Cheela (30 g)")
+  })
 })
 
 describe("composeMealDisplay — items unaffected by composition pass through unchanged", () => {
