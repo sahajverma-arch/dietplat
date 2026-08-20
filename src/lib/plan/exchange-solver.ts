@@ -108,6 +108,30 @@ export const VEGAN_PULSE_FLOOR = 2
 const PULSE_SEARCH_SPAN = 6
 const WIDEN_STEP = 2 // extra exchanges added to each floor on retry
 /**
+ * Last-resort fruit-only widening, tried in attemptTier() after both the
+ * base and widened (vegetable_a/vegetable_b/fruit together) attempts have
+ * already failed — confirmed necessary on a real client (Rohan, week 1): a
+ * large protein-ramp shortfall gets backfilled entirely into carbs by
+ * weekTargets() (see roadmap.ts), producing a target with unusually low
+ * protein (55 g) alongside unusually high carbs (383 g) for that kcal/fat
+ * level. Table 4.1's mandatory non-vegan floors (milk_skim fixed at 1,
+ * meat_lean/meat's diet-type floor, vegetable_a's floor/cap) already commit
+ * ~17-21 g of protein before any carbs are filled, and cereal — the main
+ * remaining carb source once vegetable_a/vegetable_b/pulse hit their normal
+ * ceilings — carries its own protein (2 g per 15 g carbs), so a large carb
+ * target unavoidably drags protein up with it UNLESS something else absorbs
+ * those carbs for free. fruit is that lever: 10 g carbs/exchange at 0 g
+ * protein, versus vegetable_b's 7 g carbs/2 g protein — so this tier
+ * deliberately holds vegetable_a/vegetable_b at the BASE (unwidened) floors
+ * from attemptTier() and widens ONLY fruit's ceiling, which the ordinary
+ * widened attempt never does on its own (it raises vegetable_b's floor
+ * alongside fruit's, which adds protein back and defeats the point here).
+ * Confirmed against Rohan's real target: fruit=9 (within this tier's
+ * ceiling) is what actually clears all four macros; the ordinary widened
+ * attempt's ceiling of 7 falls just short.
+ */
+const FRUIT_RESCUE_WIDEN = 6
+/**
  * A dietitian directive, not a macro constraint: curd is fixed at exactly 1
  * milk_skim exchange (320 g — Curd's own servingRawG, close enough to the
  * dietitian's "about 300 g/day" figure) every day, for every non-vegan diet
@@ -193,6 +217,25 @@ interface AnchorVariant {
  * single egg, an escape hatch for the rare target (Sneha TEST-003, Aadi
  * TEST-004) where 2 eggs' extra fat/protein can't fit the 1.5% tolerance.
  *
+ * vegetarian/jain: a dietitian directive — paneer (Table 4.1's "meat"
+ * exchange, same slot Egg occupies) should be a REAL, mandatory protein
+ * source here, not just permitted; the anchor previously fixed meat=0
+ * unconditionally, which meant no "meat"-type food (paneer included) could
+ * EVER appear for these two diet types regardless of what table41_foods.json
+ * tagged as eligible. Egg/Omelette/Egg curry/Egg bhurji's own dietTypes
+ * exclude vegetarian/jain (see table41_foods.json) — so eligible-foods.ts's
+ * existing diet_types filter naturally narrows this floor down to Paneer
+ * (+ Paneer Tikka for vegetarian only; jain has no onion-garlic-free tikka
+ * variant) with no new food tagging required. Tier 0/1 mirror eggetarian's
+ * own 2-then-1 pattern exactly (40g raw/exchange, same "too small to plate
+ * alone at 1" reasoning). Unlike eggetarian, tier 2 keeps a meat:0 escape
+ * hatch: paneer isn't the defining feature of "vegetarian" the way egg is of
+ * "eggetarian" (a vegetarian target is still clinically complete without
+ * it), and Paneer/Paneer Tikka are the ONLY vegetarian-eligible "meat" foods
+ * — a dairy-allergic client or one who dislikes paneer would otherwise have
+ * zero eligible foods for a tier that hard-requires it, failing generation
+ * outright instead of falling back gracefully.
+ *
  * non_vegetarian: tier 0 requires 2 meat_lean exchanges (real chicken/fish,
  * 35g/exchange, ~70g) — a client tagged non-vegetarian rather than
  * eggetarian expects actual meat, not just eggs, so real meat is the
@@ -207,7 +250,11 @@ function curdOnlyTiers(dietType: DietType): AnchorVariant[][] {
   switch (dietType) {
     case "vegetarian":
     case "jain":
-      return [[{ milkCow: MILK_COW_CAP, meat: 0, meatLean: 0 }]]
+      return [
+        [{ milkCow: MILK_COW_CAP, meat: 2, meatLean: 0 }],
+        [{ milkCow: MILK_COW_CAP, meat: 1, meatLean: 0 }],
+        [{ milkCow: MILK_COW_CAP, meat: 0, meatLean: 0 }],
+      ]
     case "eggetarian":
       // No meat:0 variant at either tier — an egg-free option would let the
       // cost search quietly drop the egg exchange whenever a
@@ -454,9 +501,34 @@ function attemptTier(
     return { result: second, deviation: secondDeviation, ok: true }
   }
 
-  const better = second.cost <= first.cost ? second : first
-  const betterDeviation = second.cost <= first.cost ? secondDeviation : firstDeviation
-  return { result: better, deviation: betterDeviation, ok: false }
+  // See FRUIT_RESCUE_WIDEN's own comment — vegetable_a/vegetable_b stay
+  // pinned at the BASE floors (not `widenedFloors`'s raised ones) since
+  // widening them works against this specific low-protein/high-carb
+  // scenario; only fruit's ceiling is pushed further out. milk_skim also
+  // stays pinned at the single-value MILK_SKIM_CAP, not the coarse-grid
+  // rescue band `widenedFloors` uses — curd is a hard dietitian directive
+  // ("never searched as a range" — see MILK_SKIM_CAP's own comment), not a
+  // lever this tier is allowed to reach for.
+  const fruitRescueFloors: SearchFloors = {
+    vegetableA: vegetableAFloor,
+    vegetableB: VEGETABLE_B_FLOOR,
+    fruit: FRUIT_FLOOR + FRUIT_RESCUE_WIDEN,
+    vegetableACapped: isNonVegetarian,
+    milkSkimCeiling: MILK_SKIM_CAP,
+  }
+  const third = search(input, fruitRescueFloors, variants)
+  const thirdDeviation = deviationOf(third.achieved, input)
+  if (withinAcceptance(thirdDeviation)) {
+    return { result: third, deviation: thirdDeviation, ok: true }
+  }
+
+  const candidates = [
+    { result: first, deviation: firstDeviation },
+    { result: second, deviation: secondDeviation },
+    { result: third, deviation: thirdDeviation },
+  ]
+  const better = candidates.reduce((a, b) => (b.result.cost <= a.result.cost ? b : a))
+  return { result: better.result, deviation: better.deviation, ok: false }
 }
 
 /**

@@ -22,11 +22,13 @@ import {
   dietPlanDays,
   dietPlanItems,
   dietPlanMeals,
+  dietPlanRecipeItems,
   dietPlans,
   dishCombinations,
   foods,
   mealArchetypes,
   profiles,
+  recipes,
   roadmaps,
   vegetableDishCombinationMembers,
   vegetableDishCombinations,
@@ -49,6 +51,8 @@ import {
   type PlanViewMeal,
   type WeeklySummaryRow,
 } from "./plan-guidelines"
+import { buildRecipeGuidelines } from "./recipe-guidelines"
+import { recipeItemToPlanViewItem } from "./recipe-view-adapter"
 import { TABLE_4_1, ZERO_COUNTS, type ExchangeCode, type ExchangeCounts } from "./table-4-1"
 
 export { CATEGORY_LABEL } from "./plan-guidelines"
@@ -61,6 +65,8 @@ export interface PlanViewModel {
     weekStart: string
     weekEnd: string
     status: "draft" | "approved"
+    /** Which generation pipeline produced this plan — see CLAUDE.md "The recipe engine". Governs which item table days/meals' children were loaded from, and whether swap/exchange-specific affordances apply. */
+    engine: "exchange" | "recipe"
     generationMode: "ai" | "fallback"
     modelUsed: string | null
     region: string
@@ -88,7 +94,8 @@ export interface PlanViewModel {
   days: PlanViewDay[]
   weeklySummary: WeeklySummaryRow[]
   weeklyAvg: WeeklySummaryRow
-  exchangeCounts: ExchangeCounts
+  /** Null for a recipe-engine plan — there is no exchange-count concept once foods are named recipes (see CLAUDE.md "The recipe engine"); explicit null rather than a silently-wrong all-zero ExchangeCounts. */
+  exchangeCounts: ExchangeCounts | null
   guidelines: GuidelineBullet[]
   foodsToAvoid: string[]
   narrative: string
@@ -141,40 +148,65 @@ export async function loadPlanViewModel(planId: string): Promise<PlanViewModel> 
         .orderBy(asc(dietPlanMeals.slotOrder))
     : []
 
-  const itemRows = mealRows.length
-    ? await db
-        .select({ item: dietPlanItems, food: foods })
-        .from(dietPlanItems)
-        .innerJoin(foods, eq(dietPlanItems.foodId, foods.id))
-        .where(
-          inArray(
-            dietPlanItems.dietPlanMealId,
-            mealRows.map((m) => m.id)
-          )
-        )
-    : []
-
+  // Forks by engine — the two item tables are mutually exclusive per plan
+  // (see CLAUDE.md "The recipe engine"): a recipe-engine plan's meals have
+  // zero diet_plan_items children and N diet_plan_recipe_items children, and
+  // vice versa. Both branches converge on the SAME PlanViewItem[] shape, so
+  // every downstream consumer (meal grouping, quantity formatting,
+  // guidelines) is unaware of which engine produced a given plan.
   const itemsByMealId = new Map<string, PlanViewItem[]>()
-  for (const { item, food } of itemRows) {
-    const exchangeType = item.exchangeType as ExchangeCode
-    const macros = TABLE_4_1[exchangeType]
-    const list = itemsByMealId.get(item.dietPlanMealId) ?? []
-    list.push({
-      id: item.id,
-      foodId: item.foodId,
-      nameEn: food.nameEn,
-      householdMeasure: food.householdMeasure,
-      servingRawG: item.servingRawG,
-      exchangeType,
-      exchangeCount: item.exchangeCount,
-      kcal: macros.kcal * item.exchangeCount,
-      proteinG: macros.proteinG * item.exchangeCount,
-      carbsG: macros.carbsG * item.exchangeCount,
-      fatG: macros.fatG * item.exchangeCount,
-      dishFamilyId: food.dishFamilyId,
-      tags: food.tags,
-    })
-    itemsByMealId.set(item.dietPlanMealId, list)
+  if (plan.engine === "recipe") {
+    const recipeItemRows = mealRows.length
+      ? await db
+          .select({ item: dietPlanRecipeItems, recipe: recipes })
+          .from(dietPlanRecipeItems)
+          .innerJoin(recipes, eq(dietPlanRecipeItems.recipeId, recipes.id))
+          .where(
+            inArray(
+              dietPlanRecipeItems.dietPlanMealId,
+              mealRows.map((m) => m.id)
+            )
+          )
+      : []
+    for (const { item, recipe } of recipeItemRows) {
+      const list = itemsByMealId.get(item.dietPlanMealId) ?? []
+      list.push(recipeItemToPlanViewItem(item, recipe))
+      itemsByMealId.set(item.dietPlanMealId, list)
+    }
+  } else {
+    const itemRows = mealRows.length
+      ? await db
+          .select({ item: dietPlanItems, food: foods })
+          .from(dietPlanItems)
+          .innerJoin(foods, eq(dietPlanItems.foodId, foods.id))
+          .where(
+            inArray(
+              dietPlanItems.dietPlanMealId,
+              mealRows.map((m) => m.id)
+            )
+          )
+      : []
+    for (const { item, food } of itemRows) {
+      const exchangeType = item.exchangeType as ExchangeCode
+      const macros = TABLE_4_1[exchangeType]
+      const list = itemsByMealId.get(item.dietPlanMealId) ?? []
+      list.push({
+        id: item.id,
+        foodId: item.foodId,
+        nameEn: food.nameEn,
+        householdMeasure: food.householdMeasure,
+        servingRawG: item.servingRawG,
+        exchangeType,
+        exchangeCount: item.exchangeCount,
+        kcal: macros.kcal * item.exchangeCount,
+        proteinG: macros.proteinG * item.exchangeCount,
+        carbsG: macros.carbsG * item.exchangeCount,
+        fatG: macros.fatG * item.exchangeCount,
+        dishFamilyId: food.dishFamilyId,
+        tags: food.tags,
+      })
+      itemsByMealId.set(item.dietPlanMealId, list)
+    }
   }
 
   // Dish Composition Layer, stage 1 input — names for whichever
@@ -224,8 +256,9 @@ export async function loadPlanViewModel(planId: string): Promise<PlanViewModel> 
         proteinG: acc.proteinG + i.proteinG,
         carbsG: acc.carbsG + i.carbsG,
         fatG: acc.fatG + i.fatG,
+        fiberG: (acc.fiberG ?? 0) + (i.fiberG ?? 0),
       }),
-      { kcal: 0, proteinG: 0, carbsG: 0, fatG: 0 }
+      { kcal: 0, proteinG: 0, carbsG: 0, fatG: 0, fiberG: 0 }
     )
     const list = mealsByDayId.get(meal.dietPlanDayId) ?? []
     list.push({
@@ -252,8 +285,9 @@ export async function loadPlanViewModel(planId: string): Promise<PlanViewModel> 
         proteinG: acc.proteinG + m.totals.proteinG,
         carbsG: acc.carbsG + m.totals.carbsG,
         fatG: acc.fatG + m.totals.fatG,
+        fiberG: (acc.fiberG ?? 0) + (m.totals.fiberG ?? 0),
       }),
-      { kcal: 0, proteinG: 0, carbsG: 0, fatG: 0 }
+      { kcal: 0, proteinG: 0, carbsG: 0, fatG: 0, fiberG: 0 }
     )
     const mealsWithPct = meals.map((m) => ({
       ...m,
@@ -274,6 +308,7 @@ export async function loadPlanViewModel(planId: string): Promise<PlanViewModel> 
     proteinG: d.totals.proteinG,
     carbsG: d.totals.carbsG,
     fatG: d.totals.fatG,
+    fiberG: d.totals.fiberG,
     proteinPct: d.totals.kcal > 0 ? ((d.totals.proteinG * 4) / d.totals.kcal) * 100 : 0,
     carbsPct: d.totals.kcal > 0 ? ((d.totals.carbsG * 4) / d.totals.kcal) * 100 : 0,
     fatPct: d.totals.kcal > 0 ? ((d.totals.fatG * 9) / d.totals.kcal) * 100 : 0,
@@ -286,17 +321,22 @@ export async function loadPlanViewModel(planId: string): Promise<PlanViewModel> 
         proteinG: avg(weeklySummary.map((r) => r.proteinG)),
         carbsG: avg(weeklySummary.map((r) => r.carbsG)),
         fatG: avg(weeklySummary.map((r) => r.fatG)),
+        fiberG: avg(weeklySummary.map((r) => r.fiberG ?? 0)),
         proteinPct: avg(weeklySummary.map((r) => r.proteinPct)),
         carbsPct: avg(weeklySummary.map((r) => r.carbsPct)),
         fatPct: avg(weeklySummary.map((r) => r.fatPct)),
       }
-    : { label: "Weekly Avg", kcal: 0, proteinG: 0, carbsG: 0, fatG: 0, proteinPct: 0, carbsPct: 0, fatPct: 0 }
+    : { label: "Weekly Avg", kcal: 0, proteinG: 0, carbsG: 0, fatG: 0, fiberG: 0, proteinPct: 0, carbsPct: 0, fatPct: 0 }
 
-  const exchangeCounts: ExchangeCounts = { ...ZERO_COUNTS }
-  for (const meal of days[0]?.meals ?? []) {
-    for (const item of meal.items) {
-      exchangeCounts[item.exchangeType] += item.exchangeCount
+  let exchangeCounts: ExchangeCounts | null = null
+  if (plan.engine === "exchange") {
+    const counts: ExchangeCounts = { ...ZERO_COUNTS }
+    for (const meal of days[0]?.meals ?? []) {
+      for (const item of meal.items) {
+        if (item.exchangeType !== null) counts[item.exchangeType] += item.exchangeCount
+      }
     }
+    exchangeCounts = counts
   }
 
   const targets = plan.targets as Macros
@@ -317,37 +357,58 @@ export async function loadPlanViewModel(planId: string): Promise<PlanViewModel> 
   }
 
   const roadmapOutput = roadmap.output as RoadmapResult
-  const allFoods = await db.select().from(foods)
 
-  const { guidelines, foodsToAvoid, narrative } = buildGuidelines({
-    plan,
-    days,
-    exchangeCounts,
-    roadmapOutput,
-    allFoods,
-  })
+  // Dish Composition Layer inputs (dish_combinations, vegetable_dish_
+  // combinations) and buildGuidelines()'s own allFoods load are exchange-
+  // system constructs with no recipe-engine analog — every recipe is
+  // already its own complete named identity, so this layer never applies
+  // to a recipe-engine plan. Skipping the queries entirely for plan.engine
+  // === "recipe" is honest self-documentation that this data is
+  // exchange-only, not just an unused-but-loaded value.
+  let guidelines: GuidelineBullet[]
+  let foodsToAvoid: string[]
+  let narrative: string
+  let dishCombinationRows: DishCombination[] = []
+  let vegetableDishCombinationRows: VegetableDishCombination[] = []
+  let vegetableDishCombinationMemberRows: VegetableDishCombinationMember[] = []
 
-  // Dish Composition Layer, stage 2 input — every active combination row;
-  // combineDishGroups() filters by region and matches by dish_family_id at
-  // render time. Small, unconditionally cheap to load (a handful of rows).
-  const dishCombinationRows = await db.select().from(dishCombinations).where(eq(dishCombinations.isActive, true))
+  if (plan.engine === "recipe") {
+    // dietPlans has no dedicated `cuisine` column — the recipe engine
+    // reuses `region` to carry the cuisine string, the same pragmatic reuse
+    // the deleted dish engine made of this column.
+    ;({ guidelines, foodsToAvoid, narrative } = buildRecipeGuidelines({ plan: { cuisine: plan.region, dietType: plan.dietType }, days, roadmapOutput }))
+  } else {
+    const allFoods = await db.select().from(foods)
+    ;({ guidelines, foodsToAvoid, narrative } = buildGuidelines({
+      plan,
+      days,
+      exchangeCounts: exchangeCounts!,
+      roadmapOutput,
+      allFoods,
+    }))
 
-  // Dish Composition Layer, stage 3 input — see vegetable-dish-naming.ts.
-  const vegetableDishCombinationRows = await db
-    .select()
-    .from(vegetableDishCombinations)
-    .where(eq(vegetableDishCombinations.isActive, true))
-  const vegetableDishCombinationMemberRows = vegetableDishCombinationRows.length
-    ? await db
-        .select()
-        .from(vegetableDishCombinationMembers)
-        .where(
-          inArray(
-            vegetableDishCombinationMembers.vegetableDishCombinationId,
-            vegetableDishCombinationRows.map((c) => c.id)
+    // Dish Composition Layer, stage 2 input — every active combination row;
+    // combineDishGroups() filters by region and matches by dish_family_id at
+    // render time. Small, unconditionally cheap to load (a handful of rows).
+    dishCombinationRows = await db.select().from(dishCombinations).where(eq(dishCombinations.isActive, true))
+
+    // Dish Composition Layer, stage 3 input — see vegetable-dish-naming.ts.
+    vegetableDishCombinationRows = await db
+      .select()
+      .from(vegetableDishCombinations)
+      .where(eq(vegetableDishCombinations.isActive, true))
+    vegetableDishCombinationMemberRows = vegetableDishCombinationRows.length
+      ? await db
+          .select()
+          .from(vegetableDishCombinationMembers)
+          .where(
+            inArray(
+              vegetableDishCombinationMembers.vegetableDishCombinationId,
+              vegetableDishCombinationRows.map((c) => c.id)
+            )
           )
-        )
-    : []
+      : []
+  }
 
   return {
     plan: {
@@ -356,6 +417,7 @@ export async function loadPlanViewModel(planId: string): Promise<PlanViewModel> 
       weekStart: plan.weekStart,
       weekEnd: plan.weekEnd,
       status: plan.status,
+      engine: plan.engine,
       generationMode: plan.generationMode,
       modelUsed: plan.modelUsed,
       region: plan.region,

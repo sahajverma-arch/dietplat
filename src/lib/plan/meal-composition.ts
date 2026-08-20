@@ -125,7 +125,7 @@ function composeVegetablePool(pool: PlanViewItem[], singularWord: string, plural
 }
 
 export function composeMealDisplay(items: PlanViewItem[], region: string): ComposedGroup[] {
-  const vegetables = items.filter((i) => VEGETABLE_EXCHANGE_TYPES.includes(i.exchangeType))
+  const vegetables = items.filter((i) => i.exchangeType !== null && VEGETABLE_EXCHANGE_TYPES.includes(i.exchangeType))
   const saladVegetables = vegetables.filter((i) => i.tags.includes(SALAD_TAG))
   const sabziVegetables = vegetables.filter((i) => !i.tags.includes(SALAD_TAG))
   const saladIds = new Set(saladVegetables.map((i) => i.id))

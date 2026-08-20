@@ -15,6 +15,16 @@ const envSchema = z.object({
     .string()
     .optional()
     .transform((v) => v !== "false"),
+  // Rollout flag for the recipe engine (see CLAUDE.md "The recipe engine")
+  // — defaults OFF, opposite polarity to ARCHETYPE_SELECTION_ENABLED
+  // intentionally: this is a new, unproven pipeline, not an established one
+  // being rolled back. Route.ts branches on this immediately after
+  // weekTargets() is computed. Replaces the deleted dish-gram engine's own
+  // DISH_ENGINE_ENABLED flag.
+  RECIPE_ENGINE_ENABLED: z
+    .string()
+    .optional()
+    .transform((v) => v === "true"),
 })
 
 const parsed = envSchema.safeParse({
@@ -25,6 +35,7 @@ const parsed = envSchema.safeParse({
   NVIDIA_API_KEY: process.env.NVIDIA_API_KEY,
   NVIDIA_MODEL: process.env.NVIDIA_MODEL,
   ARCHETYPE_SELECTION_ENABLED: process.env.ARCHETYPE_SELECTION_ENABLED,
+  RECIPE_ENGINE_ENABLED: process.env.RECIPE_ENGINE_ENABLED,
 })
 
 if (!parsed.success) {

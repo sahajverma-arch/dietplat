@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, timestamp, jsonb, numeric, integer, boolean } from "drizzle-orm/pg-core"
+import { pgTable, uuid, text, timestamp, jsonb, numeric, integer, boolean, vector } from "drizzle-orm/pg-core"
 import { sql } from "drizzle-orm"
 
 export const profiles = pgTable("profiles", {
@@ -297,6 +297,14 @@ export const dietPlans = pgTable("diet_plans", {
   targets: jsonb("targets").notNull(),
   achieved: jsonb("achieved").notNull(),
   deviation: jsonb("deviation").notNull(),
+  // Discriminates which generation pipeline produced this plan, and
+  // therefore which item table (diet_plan_items vs diet_plan_recipe_items)
+  // its meals' children live in. Defaults "exchange" so every historical
+  // row backfills correctly — see CLAUDE.md "The recipe engine". The
+  // dish-gram engine's own "dish" value was retired and every such row
+  // deleted (20260819100000_recipe_engine_pipeline.sql) — it never
+  // reappears in this enum.
+  engine: text("engine", { enum: ["exchange", "recipe"] }).notNull().default("exchange"),
   generationMode: text("generation_mode", { enum: ["ai", "fallback"] }).notNull(),
   modelUsed: text("model_used"),
   preparedBy: uuid("prepared_by").references(() => profiles.id),
@@ -356,6 +364,140 @@ export const dietPlanItems = pgTable("diet_plan_items", {
 export type DietPlanItem = typeof dietPlanItems.$inferSelect
 export type NewDietPlanItem = typeof dietPlanItems.$inferInsert
 
+/**
+ * One row per recipe_database.csv recipe (1222 real rows after dropping 1
+ * garbage row and deduping 2 true-duplicate name groups — see
+ * recipe-csv-parser.ts) — the recipe engine's food data, sibling to `foods`
+ * but structurally different: a recipe carries its OWN per-100g macros
+ * directly (no shared exchange_type table), because the LLM only ever names
+ * a recipe — every gram is computed and rebalanced in code afterward,
+ * never proposed by the model at all. See CLAUDE.md "The recipe engine".
+ * Replaces the deleted dish-gram engine's `dishes` table.
+ */
+export const recipes = pgTable("recipes", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  // CSV RECIPE ID — audit only, NOT unique (2 real raw duplicate ids exist
+  // in the source file, both resolved to a single kept row at ingestion).
+  recipeId: text("recipe_id").notNull(),
+  // Grounding resolver's exact-match key — see recipe-csv-parser.ts's dedup policy.
+  name: text("name").notNull().unique(),
+  dietTypes: text("diet_types").array().notNull().default([]),
+  // Normalized onto RECIPE_CUISINES — non-Indian/low-count cuisines are
+  // relabeled "General" at ingestion (recipe-cuisine-mapping.ts), a
+  // deliberate one-way transformation confirmed with the user.
+  cuisine: text("cuisine").notNull(),
+  category: text("category").notNull(), // raw CSV category, verbatim (~69 real values)
+  macroCategory: text("macro_category"), // nullable, ~44% blank — real signal: prompt table column + fallback tie-breaker, see recipe-prompt.ts
+  heavyLight: text("heavy_light").notNull(), // light | medium | heavy
+  mainOrMid: text("main_or_mid").notNull(), // 'main' | 'mid' — prompt-only hint, never LLM-enforced
+  commonality: integer("commonality").notNull(), // raw 0/1/2 — prompt bias + fallback rotation weight
+  priority: text("priority"), // real values are "Primary"/"Secondary" text (verified against the real column, NOT an integer as first assumed)
+  season: text("season").notNull(), // winter | summer | all_year — no monsoon signal in this data
+  allergenTags: text("allergen_tags").array().notNull().default([]),
+  minGrams: numeric("min_grams", { mode: "number" }).notNull(),
+  maxGrams: numeric("max_grams", { mode: "number" }).notNull(),
+  idealGrams: numeric("ideal_grams", { mode: "number" }).notNull(), // balancer's starting point (x0) — real authored typical portion, not an LLM guess
+  servingLimitsSource: text("serving_limits_source", { enum: ["computed", "fallback_category_default"] })
+    .notNull()
+    .default("computed"),
+  // Natural serving unit ("roti", "cup", "katori", "piece") derived from
+  // `Quantity per serving` + `Wt.of Measured Amt.` — see
+  // recipe-unit-label.ts. Null when the recipe is genuinely gram-measured
+  // (e.g. grilled chicken) or the source text has no derivable noun; the
+  // display layer falls back to a gram figure in that case.
+  unitLabel: text("unit_label"),
+  // Grams that ONE of unitLabel corresponds to — null iff unitLabel is null.
+  perUnitGrams: numeric("per_unit_grams", { mode: "number" }),
+  proteinPer100G: numeric("protein_per_100g", { mode: "number" }).notNull(),
+  carbsPer100G: numeric("carbs_per_100g", { mode: "number" }).notNull(),
+  fatPer100G: numeric("fat_per_100g", { mode: "number" }).notNull(),
+  fiberPer100G: numeric("fiber_per_100g", { mode: "number" }).notNull(),
+  // Postgres-generated column (Atwater) — never the CSV's own Energy/100gm
+  // column, which mixes clean numbers with literal "#VALUE!" Excel errors.
+  // Never actually null (its inputs are all NOT NULL) — annotated notNull so
+  // downstream code (recipe-balancer.ts etc.) isn't forced to null-check a
+  // value that can never be null in practice.
+  kcalPer100G: numeric("kcal_per_100g", { mode: "number" })
+    .notNull()
+    .generatedAlwaysAs(sql`round(protein_per_100g * 4 + carbs_per_100g * 4 + fat_per_100g * 9, 1)`),
+  isActive: boolean("is_active").notNull().default(true),
+  notes: text("notes"),
+  rawCsvRow: jsonb("raw_csv_row").notNull(), // full raw row, audit trail only, never read for macros
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+})
+
+export type Recipe = typeof recipes.$inferSelect
+export type NewRecipe = typeof recipes.$inferInsert
+
+/**
+ * Grounding tier 2 (exact -> alias -> fuzzy). alias is NOT globally unique
+ * across recipes — recipe-alias-generation.ts's collision handling drops an
+ * ambiguous alias entirely rather than guessing which recipe it belongs to.
+ */
+export const recipeAliases = pgTable("recipe_aliases", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  recipeId: uuid("recipe_id")
+    .notNull()
+    .references(() => recipes.id, { onDelete: "cascade" }),
+  alias: text("alias").notNull(),
+  source: text("source", { enum: ["generated", "manual"] }).notNull().default("generated"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+})
+
+export type RecipeAlias = typeof recipeAliases.$inferSelect
+export type NewRecipeAlias = typeof recipeAliases.$inferInsert
+
+/**
+ * The recipe engine's leaf item, sibling to diet_plan_items — hangs off the
+ * SAME diet_plan_meals row the exchange engine uses (dietPlans/
+ * dietPlanDays/dietPlanMeals stay 100% shared between engines; only the leaf
+ * item table forks on dietPlans.engine). grams is the code-optimized final
+ * value (see recipe-balancer.ts) — the LLM never proposes one at all.
+ */
+export const dietPlanRecipeItems = pgTable("diet_plan_recipe_items", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  dietPlanMealId: uuid("diet_plan_meal_id")
+    .notNull()
+    .references(() => dietPlanMeals.id, { onDelete: "cascade" }),
+  recipeId: uuid("recipe_id")
+    .notNull()
+    .references(() => recipes.id),
+  grams: numeric("grams", { mode: "number" }).notNull(),
+  // Snapshotted at generation time, NOT a live join to recipes — a later CSV
+  // re-ingestion that corrects a recipe's macros must never retroactively
+  // rewrite an already-approved historical plan's displayed numbers.
+  proteinPer100GSnapshot: numeric("protein_per_100g_snapshot", { mode: "number" }).notNull(),
+  carbsPer100GSnapshot: numeric("carbs_per_100g_snapshot", { mode: "number" }).notNull(),
+  fatPer100GSnapshot: numeric("fat_per_100g_snapshot", { mode: "number" }).notNull(),
+  fiberPer100GSnapshot: numeric("fiber_per_100g_snapshot", { mode: "number" }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+})
+
+export type DietPlanRecipeItem = typeof dietPlanRecipeItems.$inferSelect
+export type NewDietPlanRecipeItem = typeof dietPlanRecipeItems.$inferInsert
+
+/**
+ * Placeholder for the deferred v2 embedding-search grounding tier — created
+ * now, unpopulated and unindexed, so v2 has a ready landing spot instead of
+ * a fresh migration. Not wired into recipe-grounding.ts at all in v1. The
+ * 1536 dimension is a placeholder (OpenAI-ada-002-shaped) — TBD once a real
+ * embedding model is chosen; no ivfflat/hnsw index is built until then.
+ */
+export const recipeEmbeddings = pgTable("recipe_embeddings", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  recipeId: uuid("recipe_id")
+    .notNull()
+    .unique()
+    .references(() => recipes.id, { onDelete: "cascade" }),
+  embedding: vector("embedding", { dimensions: 1536 }),
+  embeddingModel: text("embedding_model"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+})
+
+export type RecipeEmbedding = typeof recipeEmbeddings.$inferSelect
+export type NewRecipeEmbedding = typeof recipeEmbeddings.$inferInsert
+
 /** Every generation attempt — you will need this the first time a dietitian says "the plan looks wrong". */
 export const planGenerationRuns = pgTable("plan_generation_runs", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -368,6 +510,9 @@ export const planGenerationRuns = pgTable("plan_generation_runs", {
   weekNumber: integer("week_number").notNull(),
   dietPlanId: uuid("diet_plan_id").references(() => dietPlans.id, { onDelete: "set null" }),
   attemptNumber: integer("attempt_number").notNull(),
+  // Null = a whole-week attempt. Set = a single-day retry attempt (recipe
+  // engine only) — lets /settings/generation-log distinguish the two.
+  dayIndex: integer("day_index"),
   model: text("model"),
   promptHash: text("prompt_hash").notNull(),
   rawResponse: text("raw_response"),

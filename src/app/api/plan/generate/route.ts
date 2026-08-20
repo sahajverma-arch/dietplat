@@ -19,11 +19,14 @@ import {
   dietPlanDays,
   dietPlanItems,
   dietPlanMeals,
+  dietPlanRecipeItems,
   dietPlans,
   foods,
   mealArchetypes,
   mealTemplates,
   planGenerationRuns,
+  recipeAliases,
+  recipes,
   roadmapOverrides,
   roadmaps,
   vegetableDishCombinationMembers,
@@ -34,10 +37,12 @@ import { weekTargets, type RoadmapResult } from "@/lib/counselling/roadmap"
 import { requireStaffUser } from "@/lib/counselling/require-staff-user"
 import { env } from "@/lib/env"
 import { REGIONS, SEASONS } from "@/lib/foods/vocab"
+import { eligibleCuisinesFor, RECIPE_CUISINES, templateRegionForCuisine, type RecipeCuisine } from "@/lib/foods/recipe-cuisine-mapping"
 import {
   ClientProfileError,
   clientAllergensFromAnswers,
   clientDislikesFromAnswers,
+  clientRecipeAllergenTagsFromAnswers,
   dietTypeFromAnswers,
 } from "@/lib/plan/client-profile-from-answers"
 import { selectArchetypesForWeek, type ArchetypeAssignment, type ArchetypeCandidate } from "@/lib/plan/archetype-selector"
@@ -48,6 +53,9 @@ import { distributeMeals, type MealSlotTemplate, type Skeleton } from "@/lib/pla
 import { selectFoods, type AttemptLog } from "@/lib/plan/food-selector"
 import { checkArchetypeAdherence } from "@/lib/plan/food-selector-validate"
 import type { FoodSelectorInput, PreviousWeekItem } from "@/lib/plan/food-selector-types"
+import { selectRecipes, RecipeSelectionRejectedError, type RecipeAttemptLog } from "@/lib/plan/recipe-selector"
+import type { ClientRecipeConstraints } from "@/lib/plan/recipe-plausibility-validate"
+import type { DailyRecipeTarget, MealSlotInfo, RecipeForPrompt, RecipeSelectorInput } from "@/lib/plan/recipe-types"
 import { seasonFor } from "@/lib/plan/season"
 import { sumExchanges, type AchievedMacros, type ExchangeCode, type ExchangeCounts } from "@/lib/plan/table-4-1"
 import {
@@ -65,7 +73,8 @@ import { isSameOrigin } from "@/lib/require-same-origin"
 export const runtime = "nodejs"
 export const maxDuration = 120
 
-const requestSchema = z.object({
+const exchangeRequestSchema = z.object({
+  engine: z.literal("exchange"),
   roadmapId: z.string().uuid(),
   weekNumber: z.number().int().min(1),
   region: z.enum(REGIONS),
@@ -74,6 +83,27 @@ const requestSchema = z.object({
   // dietitian override, not something the UI needs to ask for by default.
   season: z.enum(SEASONS).optional(),
 })
+
+const recipeRequestSchema = z.object({
+  engine: z.literal("recipe"),
+  roadmapId: z.string().uuid(),
+  weekNumber: z.number().int().min(1),
+  cuisine: z.enum(RECIPE_CUISINES),
+  mealCount: z.number().int().positive().default(5),
+  season: z.enum(SEASONS).optional(),
+})
+
+// `engine` defaults to "exchange" when the caller omits it entirely — both
+// existing UI callers (actions-bar.tsx, plan-actions-bar.tsx) send
+// {roadmapId, weekNumber, region} with no `engine` field, and this keeps
+// them working byte-identically. A caller wanting the recipe engine must
+// pass `engine: "recipe"` and `cuisine` explicitly.
+const requestSchema = z.preprocess((body) => {
+  if (body && typeof body === "object" && !("engine" in (body as Record<string, unknown>))) {
+    return { ...(body as Record<string, unknown>), engine: "exchange" }
+  }
+  return body
+}, z.discriminatedUnion("engine", [exchangeRequestSchema, recipeRequestSchema]))
 
 function toIsoDate(date: Date): string {
   return date.toISOString().slice(0, 10)
@@ -174,6 +204,314 @@ async function loadPreviousWeekSeed(
   return { dayIndexOffset, previousWeekLastDay, recentArchetypeIdsBySlot }
 }
 
+/**
+ * Recipe-engine analog of loadPreviousWeekSeed() above — same "continue the
+ * rotation across weeks" purpose, but queries diet_plan_recipe_items/recipes
+ * instead of diet_plan_items/foods, and carries no archetype continuity
+ * (meal archetypes are an exchange-system construct with no recipe-engine
+ * analog — see CLAUDE.md "The recipe engine").
+ */
+async function loadPreviousWeekRecipeSeed(
+  roadmapId: string,
+  weekNumber: number
+): Promise<{ dayIndexOffset: number; previousWeekLastDayRecipeNames?: Record<string, string[]> }> {
+  if (weekNumber <= 1) return { dayIndexOffset: 0 }
+  const dayIndexOffset = (weekNumber - 1) * 7
+
+  const [previousPlan] = await db
+    .select()
+    .from(dietPlans)
+    .where(and(eq(dietPlans.roadmapId, roadmapId), eq(dietPlans.weekNumber, weekNumber - 1), eq(dietPlans.engine, "recipe")))
+    .limit(1)
+  if (!previousPlan) return { dayIndexOffset }
+
+  const [lastDay] = await db
+    .select()
+    .from(dietPlanDays)
+    .where(and(eq(dietPlanDays.dietPlanId, previousPlan.id), eq(dietPlanDays.dayIndex, 6)))
+    .limit(1)
+  if (!lastDay) return { dayIndexOffset }
+
+  const mealRows = await db.select().from(dietPlanMeals).where(eq(dietPlanMeals.dietPlanDayId, lastDay.id))
+  if (mealRows.length === 0) return { dayIndexOffset }
+
+  const itemRows = await db
+    .select({ recipe: recipes, slot: dietPlanMeals.slot })
+    .from(dietPlanRecipeItems)
+    .innerJoin(dietPlanMeals, eq(dietPlanRecipeItems.dietPlanMealId, dietPlanMeals.id))
+    .innerJoin(recipes, eq(dietPlanRecipeItems.recipeId, recipes.id))
+    .where(
+      inArray(
+        dietPlanRecipeItems.dietPlanMealId,
+        mealRows.map((m) => m.id)
+      )
+    )
+
+  const previousWeekLastDayRecipeNames: Record<string, string[]> = {}
+  for (const row of itemRows) {
+    const list = previousWeekLastDayRecipeNames[row.slot] ?? []
+    list.push(row.recipe.name)
+    previousWeekLastDayRecipeNames[row.slot] = list
+  }
+  return { dayIndexOffset, previousWeekLastDayRecipeNames }
+}
+
+interface RecipeEngineContext {
+  user: { id: string }
+  roadmapId: string
+  weekNumber: number
+  cuisine: RecipeCuisine
+  mealCount: number
+  clientId: string
+  slots: MealSlotInfo[]
+  weekStartDate: Date
+  weekEndDate: Date
+  season: string
+  dailyTarget: DailyRecipeTarget
+  dietType: ReturnType<typeof dietTypeFromAnswers>
+  clientRecipeAllergenTags: string[]
+}
+
+/**
+ * The recipe engine's generation path (gated by RECIPE_ENGINE_ENABLED — see
+ * CLAUDE.md "The recipe engine"). Mirrors the exchange path's overall shape
+ * (select -> log attempts -> DB transaction -> response) but skips every
+ * exchange-specific layer entirely: no meal archetypes, no eligible-foods
+ * narrowing, no exchange solver, no pulse jitter, no curated vegetable
+ * pairs — none of those constructs apply once every recipe is already its
+ * own complete, fully-specified identity and the LLM never proposes a
+ * gram/macro number at all.
+ *
+ * Unlike every prior engine, a rejected selection (RecipeSelectionRejectedError)
+ * is NOT written to the DB and NOT silently accepted with warnings — see
+ * CLAUDE.md "The recipe engine"'s reject-semantics section.
+ */
+async function generateRecipeEnginePlan(ctx: RecipeEngineContext): Promise<NextResponse> {
+  const eligibleCuisines = eligibleCuisinesFor(ctx.cuisine)
+  const cuisineRows = await db
+    .select()
+    .from(recipes)
+    .where(and(eq(recipes.isActive, true), inArray(recipes.cuisine, eligibleCuisines)))
+
+  const filtered = cuisineRows.filter(
+    (r) =>
+      r.dietTypes.includes(ctx.dietType) &&
+      (r.season === "all_year" || r.season === ctx.season) &&
+      !r.allergenTags.some((t) => ctx.clientRecipeAllergenTags.includes(t))
+  )
+
+  if (filtered.length === 0) {
+    return NextResponse.json(
+      { error: `No eligible recipes for cuisine "${ctx.cuisine}" / diet type "${ctx.dietType}" / season "${ctx.season}".` },
+      { status: 422 }
+    )
+  }
+
+  const eligibleRecipesForPrompt: RecipeForPrompt[] = filtered.map((r) => ({
+    id: r.id,
+    name: r.name,
+    category: r.category,
+    mainOrMid: r.mainOrMid as "main" | "mid",
+    cuisine: r.cuisine,
+    macroCategory: r.macroCategory,
+    commonality: r.commonality,
+    proteinPer100G: r.proteinPer100G,
+    carbsPer100G: r.carbsPer100G,
+    fatPer100G: r.fatPer100G,
+    fiberPer100G: r.fiberPer100G,
+    kcalPer100G: r.kcalPer100G,
+  }))
+
+  const aliasRows = await db
+    .select({ recipeId: recipeAliases.recipeId, alias: recipeAliases.alias })
+    .from(recipeAliases)
+    .where(
+      inArray(
+        recipeAliases.recipeId,
+        filtered.map((r) => r.id)
+      )
+    )
+
+  const { dayIndexOffset, previousWeekLastDayRecipeNames } = await loadPreviousWeekRecipeSeed(ctx.roadmapId, ctx.weekNumber)
+
+  const recipeSelectorInput: RecipeSelectorInput = {
+    cuisine: ctx.cuisine,
+    dietType: ctx.dietType,
+    mealCount: ctx.mealCount,
+    dailyTarget: ctx.dailyTarget,
+    slots: ctx.slots,
+    eligibleRecipesForPrompt,
+    allRecipesById: new Map(filtered.map((r) => [r.id, r])),
+    eligibleCuisines,
+    clientAllergenTags: ctx.clientRecipeAllergenTags,
+    aliasRows,
+    dayIndexOffset,
+    previousWeekLastDayRecipeNames,
+  }
+  const constraints: ClientRecipeConstraints = { dietType: ctx.dietType, eligibleCuisines, allergenTags: ctx.clientRecipeAllergenTags }
+
+  const attempts: RecipeAttemptLog[] = []
+  let selectionResult: Awaited<ReturnType<typeof selectRecipes>> | undefined
+  let rejectedError: RecipeSelectionRejectedError | undefined
+  try {
+    selectionResult = await selectRecipes(recipeSelectorInput, constraints, { onAttempt: (log) => attempts.push(log) })
+  } catch (err) {
+    if (err instanceof RecipeSelectionRejectedError) {
+      rejectedError = err
+    } else {
+      throw err
+    }
+  }
+
+  let runIds: string[] = []
+  if (attempts.length > 0) {
+    const inserted = await db
+      .insert(planGenerationRuns)
+      .values(
+        attempts.map((log) => ({
+          clientId: ctx.clientId,
+          roadmapId: ctx.roadmapId,
+          weekNumber: ctx.weekNumber,
+          dietPlanId: null,
+          attemptNumber: log.attemptNumber,
+          dayIndex: log.dayIndex,
+          model: log.model,
+          promptHash: log.promptHash,
+          rawResponse: log.rawResponse,
+          validationResult: log.validationResult,
+          latencyMs: log.latencyMs,
+        }))
+      )
+      .returning({ id: planGenerationRuns.id })
+    runIds = inserted.map((r) => r.id)
+  }
+
+  if (rejectedError || !selectionResult) {
+    return NextResponse.json(
+      { error: rejectedError?.message ?? "Recipe selection failed", dayProblems: rejectedError?.dayProblems ?? [] },
+      { status: 422 }
+    )
+  }
+
+  const days = selectionResult.selection.days
+  const weeklyAverageAchieved = {
+    kcal: days.reduce((sum, d) => sum + d.totals.kcal, 0) / days.length,
+    proteinG: days.reduce((sum, d) => sum + d.totals.proteinG, 0) / days.length,
+    carbsG: days.reduce((sum, d) => sum + d.totals.carbsG, 0) / days.length,
+    fatG: days.reduce((sum, d) => sum + d.totals.fatG, 0) / days.length,
+    fibreG: days.reduce((sum, d) => sum + d.totals.fiberG, 0) / days.length,
+  }
+  // targets/achieved persist with the "fibreG" spelling to match Macros
+  // (counselling/types.ts) — this module's own internal types spell it
+  // "fiberG"; the mapping happens only at this DB-write boundary.
+  const targetsForDb = {
+    kcal: ctx.dailyTarget.kcal,
+    proteinG: ctx.dailyTarget.proteinG,
+    carbsG: ctx.dailyTarget.carbsG,
+    fatG: ctx.dailyTarget.fatG,
+    fibreG: ctx.dailyTarget.fiberG,
+  }
+
+  const deviations = days.map((day) => ({
+    dayIndex: day.dayIndex,
+    kcal: Math.abs(day.totals.kcal - ctx.dailyTarget.kcal) / ctx.dailyTarget.kcal,
+    proteinG: Math.abs(day.totals.proteinG - ctx.dailyTarget.proteinG) / ctx.dailyTarget.proteinG,
+    fatG: Math.abs(day.totals.fatG - ctx.dailyTarget.fatG) / ctx.dailyTarget.fatG,
+    carbsG: Math.abs(day.totals.carbsG - ctx.dailyTarget.carbsG) / ctx.dailyTarget.carbsG,
+    // Informational only — fiber never gates a write (see recipe-validate.ts).
+    fiberDeviationPct: ctx.dailyTarget.fiberG > 0 ? Math.abs(day.totals.fiberG - ctx.dailyTarget.fiberG) / ctx.dailyTarget.fiberG : 0,
+  }))
+
+  const dietPlanId = await db.transaction(async (tx) => {
+    const [plan] = await tx
+      .insert(dietPlans)
+      .values({
+        clientId: ctx.clientId,
+        roadmapId: ctx.roadmapId,
+        weekNumber: ctx.weekNumber,
+        weekStart: toIsoDate(ctx.weekStartDate),
+        weekEnd: toIsoDate(ctx.weekEndDate),
+        // dietPlans has no dedicated `cuisine` column — reusing `region` to
+        // carry the cuisine string, the same pragmatic reuse the deleted
+        // dish engine made of this column.
+        region: ctx.cuisine,
+        dietType: ctx.dietType,
+        engine: "recipe",
+        targets: targetsForDb,
+        achieved: weeklyAverageAchieved,
+        deviation: deviations,
+        generationMode: selectionResult.generationMode,
+        modelUsed: selectionResult.modelUsed,
+        preparedBy: ctx.user.id,
+        status: "draft",
+      })
+      .returning({ id: dietPlans.id })
+
+    for (const day of days) {
+      const [dayRow] = await tx
+        .insert(dietPlanDays)
+        .values({
+          dietPlanId: plan.id,
+          dayIndex: day.dayIndex,
+          date: toIsoDate(addDays(ctx.weekStartDate, day.dayIndex)),
+          achieved: {
+            kcal: day.totals.kcal,
+            proteinG: day.totals.proteinG,
+            carbsG: day.totals.carbsG,
+            fatG: day.totals.fatG,
+            fibreG: day.totals.fiberG,
+          },
+        })
+        .returning({ id: dietPlanDays.id })
+
+      for (const meal of day.meals) {
+        const slotOrder = ctx.slots.find((s) => s.slot === meal.slot)?.slotOrder ?? 0
+        const [mealRow] = await tx
+          .insert(dietPlanMeals)
+          .values({ dietPlanDayId: dayRow.id, slot: meal.slot, slotOrder, archetypeId: null })
+          .returning({ id: dietPlanMeals.id })
+
+        if (meal.items.length > 0) {
+          await tx.insert(dietPlanRecipeItems).values(
+            meal.items.map((item) => ({
+              dietPlanMealId: mealRow.id,
+              recipeId: item.recipe.id,
+              grams: item.grams,
+              proteinPer100GSnapshot: item.recipe.proteinPer100G,
+              carbsPer100GSnapshot: item.recipe.carbsPer100G,
+              fatPer100GSnapshot: item.recipe.fatPer100G,
+              fiberPer100GSnapshot: item.recipe.fiberPer100G,
+            }))
+          )
+        }
+      }
+    }
+
+    if (runIds.length > 0) {
+      await tx.update(planGenerationRuns).set({ dietPlanId: plan.id }).where(inArray(planGenerationRuns.id, runIds))
+    }
+
+    return plan.id
+  })
+
+  return NextResponse.json(
+    {
+      dietPlanId,
+      engine: "recipe",
+      generationMode: selectionResult.generationMode,
+      modelUsed: selectionResult.modelUsed,
+      attempts: selectionResult.attempts,
+      warnings: selectionResult.warnings,
+      season: ctx.season,
+      weekStart: toIsoDate(ctx.weekStartDate),
+      weekEnd: toIsoDate(ctx.weekEndDate),
+      achieved: weeklyAverageAchieved,
+      deviations,
+    },
+    { status: 201 }
+  )
+}
+
 export async function POST(request: Request) {
   // Route Handlers don't get Next's Server Action CSRF protection —
   // cookie auth alone can't stop a cross-site request from riding an
@@ -201,7 +539,7 @@ export async function POST(request: Request) {
   if (!bodyResult.success) {
     return NextResponse.json({ error: "Invalid request body", details: bodyResult.error.flatten() }, { status: 400 })
   }
-  const { roadmapId, weekNumber, region, mealCount, season: seasonOverride } = bodyResult.data
+  const { roadmapId, weekNumber, mealCount, season: seasonOverride } = bodyResult.data
 
   const [roadmapRow] = await db.select().from(roadmaps).where(eq(roadmaps.id, roadmapId)).limit(1)
   if (!roadmapRow) {
@@ -222,11 +560,14 @@ export async function POST(request: Request) {
   // Moved ahead of eligible-foods (was previously computed just before the
   // DB transaction, much further down) so the seasonal filter can derive
   // from the real week_start instead of "now" — the week a plan covers can
-  // start in a different season than the day it's generated on.
+  // start in a different season than the day it's generated on. seasonFor's
+  // second argument is unused (only one calendar exists today — see
+  // season.ts) so a cuisine string works exactly as well as a region one.
   const anchorDate = session.submittedAt ?? session.createdAt
   const weekStartDate = addDays(anchorDate, (weekNumber - 1) * 7)
   const weekEndDate = addDays(weekStartDate, 6)
-  const season = seasonOverride ?? seasonFor(toIsoDate(weekStartDate), region)
+  const seasonLookupKey = bodyResult.data.engine === "exchange" ? bodyResult.data.region : templateRegionForCuisine(bodyResult.data.cuisine)
+  const season = seasonOverride ?? seasonFor(toIsoDate(weekStartDate), seasonLookupKey)
 
   const roadmapOutput = roadmapRow.output as RoadmapResult
   const overrides = await db.select().from(roadmapOverrides).where(eq(roadmapOverrides.roadmapId, roadmapId))
@@ -243,6 +584,64 @@ export async function POST(request: Request) {
     )
   }
 
+  const dailyTarget = weekTargets(roadmapOutput, weekNumber)
+
+  let dietType
+  try {
+    dietType = dietTypeFromAnswers(session.answers as Answers)
+  } catch (err) {
+    if (err instanceof ClientProfileError) {
+      return NextResponse.json({ error: err.message }, { status: 422 })
+    }
+    throw err
+  }
+
+  if (bodyResult.data.engine === "recipe") {
+    if (!env.RECIPE_ENGINE_ENABLED) {
+      return NextResponse.json({ error: "The recipe engine is not enabled." }, { status: 422 })
+    }
+    const { cuisine } = bodyResult.data
+    const templateRegion = templateRegionForCuisine(cuisine)
+    const slotRows = await db
+      .select({ slot: mealTemplates.slot, slotOrder: mealTemplates.slotOrder, timeHint: mealTemplates.timeHint })
+      .from(mealTemplates)
+      .where(and(eq(mealTemplates.region, templateRegion), eq(mealTemplates.mealCount, mealCount)))
+    if (slotRows.length === 0) {
+      return NextResponse.json(
+        { error: `No meal-slot templates seeded for region "${templateRegion}" (used for cuisine "${cuisine}") with mealCount ${mealCount}.` },
+        { status: 422 }
+      )
+    }
+    const slots: MealSlotInfo[] = slotRows.map((r) => ({ slot: r.slot, slotOrder: r.slotOrder, timeHint: r.timeHint }))
+    const clientRecipeAllergenTags = clientRecipeAllergenTagsFromAnswers(session.answers as Answers)
+    const dailyRecipeTarget: DailyRecipeTarget = {
+      kcal: dailyTarget.kcal,
+      proteinG: dailyTarget.proteinG,
+      carbsG: dailyTarget.carbsG,
+      fatG: dailyTarget.fatG,
+      fiberG: dailyTarget.fibreG,
+    }
+
+    return generateRecipeEnginePlan({
+      user,
+      roadmapId,
+      weekNumber,
+      cuisine,
+      mealCount,
+      clientId: client.id,
+      slots,
+      weekStartDate,
+      weekEndDate,
+      season,
+      dailyTarget: dailyRecipeTarget,
+      dietType,
+      clientRecipeAllergenTags,
+    })
+  }
+
+  // engine === "exchange" — everything below is byte-identical to before
+  // the recipe engine existed; the exchange path is never touched by it.
+  const { region } = bodyResult.data
   const templateRows = await db
     .select({
       slot: mealTemplates.slot,
@@ -263,17 +662,6 @@ export async function POST(request: Request) {
     allowedExchangeTypes: r.allowedExchangeTypes as ExchangeCode[],
   }))
 
-  const dailyTarget = weekTargets(roadmapOutput, weekNumber)
-
-  let dietType
-  try {
-    dietType = dietTypeFromAnswers(session.answers as Answers)
-  } catch (err) {
-    if (err instanceof ClientProfileError) {
-      return NextResponse.json({ error: err.message }, { status: 422 })
-    }
-    throw err
-  }
   const clientAllergens = clientAllergensFromAnswers(session.answers as Answers)
   const clientDislikes = clientDislikesFromAnswers(session.answers as Answers)
 

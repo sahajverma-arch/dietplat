@@ -68,6 +68,8 @@ export interface AchievedMacros {
   proteinG: number
   carbsG: number
   fatG: number
+  /** Optional, additive widening for the recipe engine's soft fiber tracking (see recipe-validate.ts) — never populated by sumExchanges() below, the exchange engine's own display stays unaffected. */
+  fiberG?: number
 }
 
 export function sumExchanges(counts: ExchangeCounts): AchievedMacros {

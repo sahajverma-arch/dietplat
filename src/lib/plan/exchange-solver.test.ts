@@ -33,11 +33,14 @@ describe("solveExchanges — real plan reproduction (Deepak Sharma, maintenance)
     // 0 here, not the real plan's 2: MILK_COW_CAP now fixes it at 0
     // exchanges for every diet type — a dietitian directive to default to
     // curd (milk_skim) over milk — with the solver's existing fat/pulse/
-    // milk_skim flexibility absorbing the difference.
+    // milk_skim flexibility absorbing the difference. meat is 2 here, not
+    // the real plan's 0: vegetarian's anchor now mandates a real paneer
+    // floor (see curdOnlyTiers()'s own comment) — this real plan predates
+    // that directive, so it diverges here by design, not by drift.
     expect(result.exchangeCounts.cereal).toBeGreaterThan(14)
     expect(result.exchangeCounts.cereal).toBeLessThan(22)
     expect(result.exchangeCounts.milk_cow).toBe(0)
-    expect(result.exchangeCounts.meat).toBe(0)
+    expect(result.exchangeCounts.meat).toBe(2)
     expect(result.exchangeCounts.meat_lean).toBe(0)
     expect(result.exchangeCounts.vegetable_a).toBeGreaterThanOrEqual(4)
     expect(result.exchangeCounts.vegetable_b).toBeGreaterThanOrEqual(2)
@@ -94,9 +97,9 @@ describe("solveExchanges — diet type behaviour", () => {
     expect(counts.pulse).toBeGreaterThanOrEqual(2)
   })
 
-  it("vegetarian never uses meat or meat_lean", () => {
+  it("vegetarian carries a mandatory paneer (meat) floor but never meat_lean", () => {
     const counts = countsOf(solveExchanges({ ...base, dietType: "vegetarian" }))
-    expect(counts.meat).toBe(0)
+    expect(counts.meat).toBeGreaterThan(0)
     expect(counts.meat_lean).toBe(0)
   })
 

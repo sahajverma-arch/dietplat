@@ -7,6 +7,7 @@
  * this file never touches a calorie or macro number).
  */
 
+import { CLIENT_ALLERGEN_LABEL_TO_RECIPE_TAGS } from "@/lib/foods/recipe-allergen-normalize"
 import type { Answers } from "@/lib/counselling/questions"
 import type { REGIONS } from "@/lib/foods/vocab"
 import type { DietType } from "./exchange-solver"
@@ -103,6 +104,33 @@ export function clientAllergensFromAnswers(answers: Answers): string[] {
   }
 
   return [...vocab]
+}
+
+/**
+ * Same q27 "Allergy — never serve" hard-exclusion gate as
+ * clientAllergensFromAnswers(), mapped onto the recipe engine's own
+ * allergen tag vocabulary (recipe-allergen-normalize.ts) instead of
+ * foods.allergens — the two vocabularies are deliberately separate (see
+ * CLAUDE.md "The recipe engine"), so this is a distinct function, not a
+ * reuse of the exchange engine's mapping. Closes the gap CLAUDE.md flagged
+ * as unaddressed for the (now-deleted) dish-gram engine: recipes carrying a
+ * client's declared allergen are hard-excluded from the eligible pool the
+ * LLM ever sees, never filtered post-hoc.
+ */
+export function clientRecipeAllergenTagsFromAnswers(answers: Answers): string[] {
+  const reported = answers.q27
+  const labels = Array.isArray(reported) ? reported.filter((l): l is string => typeof l === "string") : []
+  const tags = new Set<string>()
+
+  for (const label of labels) {
+    const slug = ALLERGEN_LABEL_TO_SLUG[label]
+    if (!slug) continue
+    if (answers[`q27_${slug}_type`] !== "Allergy — never serve") continue
+    const mappedTags = CLIENT_ALLERGEN_LABEL_TO_RECIPE_TAGS[label]
+    if (mappedTags) mappedTags.forEach((t) => tags.add(t))
+  }
+
+  return [...tags]
 }
 
 /** q36 is free text ("which foods do you dislike"), matched against food names by eligible-foods.ts — best-effort, not a structured vocab. */

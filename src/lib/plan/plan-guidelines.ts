@@ -49,12 +49,18 @@ export interface PlanViewItem {
   nameEn: string
   householdMeasure: string | null
   servingRawG: number | null
-  exchangeType: ExchangeCode
+  /** Null for a recipe-engine item (see recipe-view-adapter.ts) — every exchangeType-keyed check elsewhere (format-item.ts, meal-composition.ts, vegetable-dish-naming.ts) is naturally false/no-op for null, which is correct: a recipe is already its own complete, realistically-named identity. */
+  exchangeType: ExchangeCode | null
+  /** Meaningless (0) for a dish-engine item — grams (servingRawG) is the real quantity there. */
   exchangeCount: number
   kcal: number
   proteinG: number
   carbsG: number
   fatG: number
+  /** Optional, additive widening — populated for a recipe-engine item (see recipe-view-adapter.ts), absent for an exchange-engine item. Fiber is a soft target for the recipe engine, tracked and shown, never gating (see recipe-validate.ts). */
+  fiberG?: number
+  /** Recipe-engine only: a whole-number natural quantity ("3 pieces", "1 cup") — see recipe-quantity-display.ts. Null when the recipe has no derivable unit (falls back to a gram figure) or for an exchange-engine item. */
+  quantityLabel?: string | null
   /** Dish Composition Layer input — see dish-combination.ts / meal-composition.ts. Never read by any nutrition calculation. */
   dishFamilyId: string | null
   /** Straight from foods.tags — meal-composition.ts reads the "salad" tag to keep raw/salad vegetables out of the cooked "Mixed Vegetable Sabzi" pool. Never read by any nutrition calculation. */
@@ -102,6 +108,8 @@ export interface WeeklySummaryRow {
   proteinPct: number
   carbsPct: number
   fatPct: number
+  /** Optional, additive widening — populated only for a recipe-engine plan's weekly summary. */
+  fiberG?: number
 }
 
 export interface GuidelineBullet {

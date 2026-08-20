@@ -10,6 +10,8 @@ export const REGIONS = [
   "generic",
 ] as const
 
+export type Region = (typeof REGIONS)[number]
+
 // Display labels for the regions a diet plan can actually be generated for
 // — everything in REGIONS except "generic", which is a food-tag ("usable in
 // any region's plan"), never a plan's own region. Which regions are

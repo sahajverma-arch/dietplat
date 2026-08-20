@@ -43,7 +43,7 @@ import { GENERIC_MIXED_VEG_PREFIX, type ComposedGroup } from "./meal-composition
 const VEGETABLE_TYPES = new Set(["vegetable_a", "vegetable_b"])
 
 function isVegetableMixedDish(group: ComposedGroup): boolean {
-  return group.kind === "mixed_dish" && group.items.every((item) => VEGETABLE_TYPES.has(item.exchangeType))
+  return group.kind === "mixed_dish" && group.items.every((item) => item.exchangeType !== null && VEGETABLE_TYPES.has(item.exchangeType))
 }
 
 export function applyVegetableDishNames(
