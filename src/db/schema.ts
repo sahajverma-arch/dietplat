@@ -389,9 +389,24 @@ export const recipes = pgTable("recipes", {
   category: text("category").notNull(), // raw CSV category, verbatim (~69 real values)
   macroCategory: text("macro_category"), // nullable, ~44% blank — real signal: prompt table column + fallback tie-breaker, see recipe-prompt.ts
   heavyLight: text("heavy_light").notNull(), // light | medium | heavy
+  // 'liquid' | 'solid' | null (blank/unrecognized source value) — see
+  // recipe-consistency-normalize.ts. Used by recipe-plausibility-validate.ts
+  // to stop a liquid dish (soup/tea/shake) from anchoring lunch or dinner.
+  consistency: text("consistency"),
   mainOrMid: text("main_or_mid").notNull(), // 'main' | 'mid' — prompt-only hint, never LLM-enforced
   commonality: integer("commonality").notNull(), // raw 0/1/2 — prompt bias + fallback rotation weight
   priority: text("priority"), // real values are "Primary"/"Secondary" text (verified against the real column, NOT an integer as first assumed)
+  // Dietitian-authored pairing data from the CSV's own "Must/Good to have
+  // Category/Recipe" columns — real values are Category strings (e.g.
+  // "Pulao, Khichdi, Biryani") or literal recipe names (e.g. "Mint Chutney,
+  // Coriander Chutney"), never IDs — matched case-insensitively at use time
+  // (recipe-pairing.ts), not resolved/grounded at ingestion. "Must have" is
+  // a hard plausibility gate (recipe-plausibility-validate.ts); "good to
+  // have" is prompt-visible guidance only, never enforced.
+  mustHaveCategories: text("must_have_categories").array().notNull().default([]),
+  goodToHaveCategories: text("good_to_have_categories").array().notNull().default([]),
+  mustHaveRecipeNames: text("must_have_recipe_names").array().notNull().default([]),
+  goodToHaveRecipeNames: text("good_to_have_recipe_names").array().notNull().default([]),
   season: text("season").notNull(), // winter | summer | all_year — no monsoon signal in this data
   allergenTags: text("allergen_tags").array().notNull().default([]),
   minGrams: numeric("min_grams", { mode: "number" }).notNull(),
@@ -498,6 +513,182 @@ export const recipeEmbeddings = pgTable("recipe_embeddings", {
 export type RecipeEmbedding = typeof recipeEmbeddings.$inferSelect
 export type NewRecipeEmbedding = typeof recipeEmbeddings.$inferInsert
 
+/**
+ * Dietitian Knowledge RAG layer (see CLAUDE.md "Dietitian knowledge
+ * layer") — a SEPARATE knowledge base from `recipes`: dietitian domain
+ * reasoning (regional identity, meal-slot patterns, combination rules,
+ * serving norms, goal-construction principles), never recipes or
+ * nutrition numbers. Retrieved and injected as descriptive prompt text
+ * only — the LLM's output contract (recipe-schema.ts) is untouched.
+ *
+ * One row per source markdown file under
+ * src/db/seed-data/dietitian-knowledge/. `regions`/`dietTypes`/`goals`/
+ * `mealSlots` are v1's deterministic retrieval filter — an EMPTY array
+ * means "applies universally", the same wildcard convention `foods.seasons`
+ * already uses for "all_year". `regions` values reuse the exact
+ * `RecipeCuisine` strings flowing through RecipeSelectorInput.cuisine, not
+ * a second region vocabulary.
+ */
+export const dietitianKnowledgeDocs = pgTable("dietitian_knowledge_docs", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  slug: text("slug").notNull().unique(),
+  title: text("title").notNull(),
+  category: text("category", {
+    enum: [
+      "meal_pattern",
+      "meal_slot",
+      "region",
+      "goal",
+      "combination",
+      "serving_norm",
+      "protein",
+      "variety",
+      "adherence",
+      "reasoning_example",
+    ],
+  }).notNull(),
+  status: text("status", { enum: ["draft", "confirmed"] }).notNull().default("draft"),
+  version: integer("version").notNull().default(1),
+  confirmedBy: text("confirmed_by"),
+  confirmedAt: timestamp("confirmed_at", { withTimezone: true }),
+  regions: text("regions").array().notNull().default([]),
+  dietTypes: text("diet_types").array().notNull().default([]),
+  goals: text("goals").array().notNull().default([]),
+  mealSlots: text("meal_slots").array().notNull().default([]),
+  // Author-assigned relevance, 1-10 — mirrors recipes.commonality/priority's
+  // existing precedent as a retrieval-ranking tie-breaker.
+  weight: integer("weight").notNull().default(5),
+  sourceFile: text("source_file").notNull(),
+  rawMarkdown: text("raw_markdown").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+})
+
+export type DietitianKnowledgeDoc = typeof dietitianKnowledgeDocs.$inferSelect
+export type NewDietitianKnowledgeDoc = typeof dietitianKnowledgeDocs.$inferInsert
+
+/** One row per markdown H2 section — the actual retrieval/injection unit. Doc-level frontmatter filters apply to every chunk of that doc; there is no per-chunk filter override (see knowledge-markdown-parser.ts). */
+export const dietitianKnowledgeChunks = pgTable("dietitian_knowledge_chunks", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  docId: uuid("doc_id")
+    .notNull()
+    .references(() => dietitianKnowledgeDocs.id, { onDelete: "cascade" }),
+  slug: text("slug").notNull().unique(),
+  heading: text("heading").notNull(),
+  chunkOrder: integer("chunk_order").notNull(),
+  content: text("content").notNull(),
+  // Math.ceil(content.length / 4) at ingestion — no tokenizer dependency
+  // exists in this stack; used for prompt-budget selection at retrieval.
+  estimatedTokens: integer("estimated_tokens").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+})
+
+export type DietitianKnowledgeChunk = typeof dietitianKnowledgeChunks.$inferSelect
+export type NewDietitianKnowledgeChunk = typeof dietitianKnowledgeChunks.$inferInsert
+
+/**
+ * Placeholder for a deferred v2 semantic-retrieval tier — exact mirror of
+ * recipeEmbeddings above (same 1536-dim placeholder, same "unpopulated, no
+ * ANN index until a model is chosen" posture). Not wired into
+ * knowledge-retrieval.ts at all in v1, which is deterministic tag-filtering
+ * only.
+ */
+export const dietitianKnowledgeEmbeddings = pgTable("dietitian_knowledge_embeddings", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  chunkId: uuid("chunk_id")
+    .notNull()
+    .unique()
+    .references(() => dietitianKnowledgeChunks.id, { onDelete: "cascade" }),
+  embedding: vector("embedding", { dimensions: 1536 }),
+  embeddingModel: text("embedding_model"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+})
+
+export type DietitianKnowledgeEmbedding = typeof dietitianKnowledgeEmbeddings.$inferSelect
+export type NewDietitianKnowledgeEmbedding = typeof dietitianKnowledgeEmbeddings.$inferInsert
+
+/**
+ * Diet Plan Examples RAG layer (see CLAUDE.md "Diet plan examples layer")
+ * — a SECOND, independent RAG layer from dietitianKnowledgeDocs/Chunks
+ * above: not principles ("how dietitians think") but complete real example
+ * days ("what dietitians actually build"), injected as few-shot precedent
+ * ranked ABOVE the knowledge-chunk guidance. One row = one complete day,
+ * never chunked — chunking a day the way knowledge docs are chunked would
+ * destroy the "complete day" signal this layer exists to preserve.
+ *
+ * Two-tier content model: `sourceType = 'real'` rows are adapted from real,
+ * credentialed public sources (source_url/source_credibility populated,
+ * status starts 'draft' pending dietitian review); `sourceType =
+ * 'synthetic'` rows are explicitly fabricated filler (source_url/
+ * source_credibility null), used ONLY to cover combinations the real set
+ * doesn't reach — retrieval never lets a synthetic row outrank an eligible
+ * real one. Neither tier is ever presented to the LLM as anything other
+ * than "a real example day" in framing text — the real/synthetic
+ * distinction is an internal ranking/audit concern, not something exposed
+ * in the prompt itself.
+ */
+export const dietPlanExamples = pgTable("diet_plan_examples", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  slug: text("slug").notNull().unique(),
+  goal: text("goal", { enum: ["fat_loss", "muscle_gain", "maintenance"] }).notNull(),
+  // Positive-list, NOT empty-means-universal — mirrors recipes.dietTypes'
+  // existing convention exactly (r.dietTypes.includes(ctx.dietType)). An
+  // example is never diet-type-universal; every compatible DietType must
+  // be listed explicitly, authored by hand at ingestion same as recipes.
+  dietTypes: text("diet_types").array().notNull().default([]),
+  // Reuses RecipeCuisine's 9 values ("General" = pan-Indian), singular —
+  // a real example was built for one region.
+  region: text("region").notNull(),
+  gender: text("gender", { enum: ["male", "female", "any"] }).notNull().default("any"),
+  calorieMin: numeric("calorie_min", { mode: "number" }).notNull(),
+  calorieMax: numeric("calorie_max", { mode: "number" }).notNull(),
+  mealCount: integer("meal_count").notNull(),
+  // Array of {slot, timeHint, items} — structured, not pre-formatted text,
+  // so the row stays queryable/auditable and recipe-prompt.ts's formatter
+  // owns rendering, same separation RecipeForPrompt/RetrievedKnowledgeChunk
+  // already use. `items` are free-text strings, never grounded recipe
+  // references — this layer never touches recipe-grounding.ts.
+  mealStructure: jsonb("meal_structure").notNull(),
+  reasoning: text("reasoning"),
+  // v1 no-op at retrieval — no client-condition signal exists anywhere in
+  // this pipeline yet (same class of gap goal-inference.ts closed for
+  // "goal"). Ingested and stored now, ready for a v2 retrieval dimension.
+  condition: text("condition").array().notNull().default([]),
+  sourceType: text("source_type", { enum: ["real", "synthetic"] }).notNull().default("real"),
+  // Required for sourceType='real' rows, null for 'synthetic' — enforced
+  // at ingestion (seed-diet-plan-examples.ts), not a DB constraint.
+  sourceUrl: text("source_url"),
+  sourceCredibility: text("source_credibility"),
+  status: text("status", { enum: ["draft", "confirmed"] }).notNull().default("draft"),
+  weight: integer("weight").notNull().default(5),
+  dayLabel: text("day_label"),
+  sourceFile: text("source_file").notNull(),
+  rawMarkdown: text("raw_markdown").notNull(),
+  estimatedTokens: integer("estimated_tokens").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+})
+
+export type DietPlanExample = typeof dietPlanExamples.$inferSelect
+export type NewDietPlanExample = typeof dietPlanExamples.$inferInsert
+
+/** Placeholder for a deferred v2 semantic-retrieval tier — mirrors recipeEmbeddings/dietitianKnowledgeEmbeddings exactly. Lower priority than even the knowledge layer's own placeholder: v1's entire similarity surface (goal/dietType/region/calories/mealCount) is literal structured columns, nothing here benefits from embeddings without also changing what's matched. */
+export const dietPlanExampleEmbeddings = pgTable("diet_plan_example_embeddings", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  exampleId: uuid("example_id")
+    .notNull()
+    .unique()
+    .references(() => dietPlanExamples.id, { onDelete: "cascade" }),
+  embedding: vector("embedding", { dimensions: 1536 }),
+  embeddingModel: text("embedding_model"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+})
+
+export type DietPlanExampleEmbedding = typeof dietPlanExampleEmbeddings.$inferSelect
+export type NewDietPlanExampleEmbedding = typeof dietPlanExampleEmbeddings.$inferInsert
+
 /** Every generation attempt — you will need this the first time a dietitian says "the plan looks wrong". */
 export const planGenerationRuns = pgTable("plan_generation_runs", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -518,6 +709,15 @@ export const planGenerationRuns = pgTable("plan_generation_runs", {
   rawResponse: text("raw_response"),
   validationResult: jsonb("validation_result").notNull(),
   latencyMs: integer("latency_ms").notNull(),
+  // Dietitian Knowledge RAG audit trail — {injected: [...], droppedForBudget:
+  // [...]} chunk slugs. Null for every exchange-engine run and any
+  // recipe-engine run predating DIETITIAN_KNOWLEDGE_ENABLED, not backfilled.
+  knowledgeChunksInjected: jsonb("knowledge_chunks_injected"),
+  // Diet Plan Examples RAG audit trail — same {injected, droppedForBudget}
+  // shape, a sibling column (not merged into knowledgeChunksInjected) so
+  // the two RAG layers stay independently queryable. Null for every run
+  // predating DIET_PLAN_EXAMPLES_ENABLED.
+  dietPlanExamplesInjected: jsonb("diet_plan_examples_injected"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 })
 

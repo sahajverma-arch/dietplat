@@ -50,8 +50,8 @@ const CATEGORY_DEFAULT_LIMITS: Record<RecipeCategoryBucket, { min: number; max: 
   other: { min: 50, max: 200, ideal: 100 },
 }
 
-function fallback(category: string, flags: string[]): ServingLimits {
-  const bucket = recipeCategoryBucket(category)
+function fallback(category: string, name: string, flags: string[]): ServingLimits {
+  const bucket = recipeCategoryBucket(category, name)
   const d = CATEGORY_DEFAULT_LIMITS[bucket]
   return { minGrams: d.min, maxGrams: d.max, idealGrams: d.ideal, source: "fallback_category_default", flags }
 }
@@ -102,7 +102,7 @@ export function computeServingLimits(row: RawRecipeRow): ServingLimits {
       const [lo, hi] = min <= max ? [min, max] : [max, min]
       return { minGrams: Math.round(lo), maxGrams: Math.round(hi), idealGrams: Math.round((lo + hi) / 2), source: "computed", flags }
     }
-    return fallback(row.category, flags)
+    return fallback(row.category, row.name, flags)
   }
 
   const minQty = Number(minRaw)
@@ -121,7 +121,7 @@ export function computeServingLimits(row: RawRecipeRow): ServingLimits {
     wtOfMeasuredAmt.value == null
   ) {
     flags.push("Could not extract a usable Quantity-per-serving / Wt.of-Measured-Amt number")
-    return fallback(row.category, flags)
+    return fallback(row.category, row.name, flags)
   }
 
   const perUnitGrams = wtOfMeasuredAmt.value / qtyPerServing.value
@@ -133,7 +133,7 @@ export function computeServingLimits(row: RawRecipeRow): ServingLimits {
 
   if (!Number.isFinite(minGrams) || !Number.isFinite(maxGrams) || minGrams < PLAUSIBLE_GRAMS_RANGE.min || maxGrams > PLAUSIBLE_GRAMS_RANGE.max) {
     flags.push(`Computed range ${minGrams.toFixed(0)}-${maxGrams.toFixed(0)}g fell outside the plausibility envelope`)
-    return fallback(row.category, flags)
+    return fallback(row.category, row.name, flags)
   }
 
   return { minGrams: Math.round(minGrams), maxGrams: Math.round(maxGrams), idealGrams, source: "computed", flags }

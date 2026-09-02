@@ -16,7 +16,10 @@ import {
   archetypeComponents,
   clients,
   counsellingSessions,
+  dietitianKnowledgeChunks,
+  dietitianKnowledgeDocs,
   dietPlanDays,
+  dietPlanExamples as dietPlanExamplesTable,
   dietPlanItems,
   dietPlanMeals,
   dietPlanRecipeItems,
@@ -47,8 +50,12 @@ import {
 } from "@/lib/plan/client-profile-from-answers"
 import { selectArchetypesForWeek, type ArchetypeAssignment, type ArchetypeCandidate } from "@/lib/plan/archetype-selector"
 import { computeDailyPulseJitter } from "@/lib/plan/daily-macro-jitter"
+import { retrieveDietPlanExamples, type DietPlanExampleForRetrieval, type DroppedDietPlanExample, type RetrievedDietPlanExample } from "@/lib/plan/diet-plan-example-retrieval"
+import type { ParsedMealSlot } from "@/lib/plan/diet-plan-example-markdown-parser"
 import { NoEligibleFoodsError, eligibleFoodsForSkeleton, type DishFamilyConstraintsBySlot } from "@/lib/plan/eligible-foods"
 import { solveExchanges } from "@/lib/plan/exchange-solver"
+import { inferGoalFromRoadmap } from "@/lib/plan/goal-inference"
+import { retrieveKnowledgeChunks, type DroppedKnowledgeChunk, type KnowledgeDocForRetrieval, type RetrievedKnowledgeChunk } from "@/lib/plan/knowledge-retrieval"
 import { distributeMeals, type MealSlotTemplate, type Skeleton } from "@/lib/plan/meal-distributor"
 import { selectFoods, type AttemptLog } from "@/lib/plan/food-selector"
 import { checkArchetypeAdherence } from "@/lib/plan/food-selector-validate"
@@ -270,6 +277,12 @@ interface RecipeEngineContext {
   dailyTarget: DailyRecipeTarget
   dietType: ReturnType<typeof dietTypeFromAnswers>
   clientRecipeAllergenTags: string[]
+  /** Dietitian Knowledge RAG layer (gated by DIETITIAN_KNOWLEDGE_ENABLED) — empty when off or nothing retrieved. See CLAUDE.md "Dietitian knowledge layer". */
+  knowledgeChunks: RetrievedKnowledgeChunk[]
+  knowledgeDroppedForBudget: DroppedKnowledgeChunk[]
+  /** Diet Plan Examples RAG layer (gated by DIET_PLAN_EXAMPLES_ENABLED) — empty when off or nothing retrieved. See CLAUDE.md "Diet plan examples layer". */
+  dietPlanExamples: RetrievedDietPlanExample[]
+  dietPlanExamplesDroppedForBudget: DroppedDietPlanExample[]
 }
 
 /**
@@ -311,10 +324,15 @@ async function generateRecipeEnginePlan(ctx: RecipeEngineContext): Promise<NextR
     id: r.id,
     name: r.name,
     category: r.category,
+    consistency: r.consistency,
     mainOrMid: r.mainOrMid as "main" | "mid",
     cuisine: r.cuisine,
     macroCategory: r.macroCategory,
     commonality: r.commonality,
+    mustHaveCategories: r.mustHaveCategories,
+    goodToHaveCategories: r.goodToHaveCategories,
+    mustHaveRecipeNames: r.mustHaveRecipeNames,
+    goodToHaveRecipeNames: r.goodToHaveRecipeNames,
     proteinPer100G: r.proteinPer100G,
     carbsPer100G: r.carbsPer100G,
     fatPer100G: r.fatPer100G,
@@ -347,6 +365,8 @@ async function generateRecipeEnginePlan(ctx: RecipeEngineContext): Promise<NextR
     aliasRows,
     dayIndexOffset,
     previousWeekLastDayRecipeNames,
+    knowledgeChunks: ctx.knowledgeChunks,
+    dietPlanExamples: ctx.dietPlanExamples,
   }
   const constraints: ClientRecipeConstraints = { dietType: ctx.dietType, eligibleCuisines, allergenTags: ctx.clientRecipeAllergenTags }
 
@@ -362,6 +382,22 @@ async function generateRecipeEnginePlan(ctx: RecipeEngineContext): Promise<NextR
       throw err
     }
   }
+
+  // Same knowledge injection for every attempt log row within this one
+  // generation call — retrieval runs once per request, not once per
+  // attempt. Null (not {injected:[],droppedForBudget:[]}) when nothing was
+  // ever retrieved, so a query can cheaply distinguish "layer off/empty"
+  // from "layer on, genuinely nothing matched".
+  const knowledgeChunksInjected =
+    ctx.knowledgeChunks.length > 0 || ctx.knowledgeDroppedForBudget.length > 0
+      ? { injected: ctx.knowledgeChunks.map((c) => c.slug), droppedForBudget: ctx.knowledgeDroppedForBudget.map((d) => d.slug) }
+      : null
+  // Sibling audit object, same shape, its own column — keeps the two RAG
+  // layers independently queryable.
+  const dietPlanExamplesInjected =
+    ctx.dietPlanExamples.length > 0 || ctx.dietPlanExamplesDroppedForBudget.length > 0
+      ? { injected: ctx.dietPlanExamples.map((e) => e.slug), droppedForBudget: ctx.dietPlanExamplesDroppedForBudget.map((d) => d.slug) }
+      : null
 
   let runIds: string[] = []
   if (attempts.length > 0) {
@@ -380,6 +416,8 @@ async function generateRecipeEnginePlan(ctx: RecipeEngineContext): Promise<NextR
           rawResponse: log.rawResponse,
           validationResult: log.validationResult,
           latencyMs: log.latencyMs,
+          knowledgeChunksInjected,
+          dietPlanExamplesInjected,
         }))
       )
       .returning({ id: planGenerationRuns.id })
@@ -622,6 +660,100 @@ export async function POST(request: Request) {
       fiberG: dailyTarget.fibreG,
     }
 
+    // Dietitian Knowledge RAG layer (see CLAUDE.md "Dietitian knowledge
+    // layer") — deterministic tag-filtered retrieval only, no embeddings in
+    // v1. Off by default (DIETITIAN_KNOWLEDGE_ENABLED); `knowledgeChunks`
+    // stays [] and formatKnowledgeSection() renders nothing, so the prompt
+    // is byte-identical to before this layer existed.
+    let knowledgeChunks: RetrievedKnowledgeChunk[] = []
+    let knowledgeDroppedForBudget: DroppedKnowledgeChunk[] = []
+    if (env.DIETITIAN_KNOWLEDGE_ENABLED) {
+      const goal = inferGoalFromRoadmap(roadmapOutput, weekNumber)
+      const [docRows, chunkRows] = await Promise.all([db.select().from(dietitianKnowledgeDocs), db.select().from(dietitianKnowledgeChunks)])
+      const chunksByDocId = new Map<string, typeof chunkRows>()
+      for (const chunk of chunkRows) {
+        const list = chunksByDocId.get(chunk.docId) ?? []
+        list.push(chunk)
+        chunksByDocId.set(chunk.docId, list)
+      }
+      const docsForRetrieval: KnowledgeDocForRetrieval[] = docRows.map((doc) => ({
+        slug: doc.slug,
+        category: doc.category,
+        regions: doc.regions,
+        dietTypes: doc.dietTypes,
+        goals: doc.goals,
+        mealSlots: doc.mealSlots,
+        weight: doc.weight,
+        chunks: (chunksByDocId.get(doc.id) ?? []).map((c) => ({
+          slug: c.slug,
+          heading: c.heading,
+          content: c.content,
+          estimatedTokens: c.estimatedTokens,
+        })),
+      }))
+      const retrieval = retrieveKnowledgeChunks(docsForRetrieval, {
+        cuisine,
+        dietType,
+        goal,
+        mealSlots: slots.map((s) => s.slot),
+      })
+      knowledgeChunks = retrieval.chunks
+      knowledgeDroppedForBudget = retrieval.droppedForBudget
+      if (knowledgeDroppedForBudget.length > 0) {
+        console.warn(`Dietitian knowledge retrieval dropped ${knowledgeDroppedForBudget.length} chunk(s) for token budget:`, knowledgeDroppedForBudget)
+      }
+    }
+
+    // Diet Plan Examples RAG layer (see CLAUDE.md "Diet plan examples
+    // layer") — a second, independent layer from the knowledge layer
+    // above: complete real (and real/synthetic-tiered) example days,
+    // ranked above the knowledge chunks in the rendered prompt. Off by
+    // default (DIET_PLAN_EXAMPLES_ENABLED); dietPlanExamples stays [] and
+    // formatExamplesSection() renders nothing, so the prompt is
+    // byte-identical to before this layer existed.
+    let dietPlanExamples: RetrievedDietPlanExample[] = []
+    let dietPlanExamplesDroppedForBudget: DroppedDietPlanExample[] = []
+    if (env.DIET_PLAN_EXAMPLES_ENABLED) {
+      // inferGoalFromRoadmap() is pure/cheap — called again independently
+      // rather than hoisting the call above out of the knowledge-layer
+      // block, since that block is otherwise untouched by this layer.
+      const goal = inferGoalFromRoadmap(roadmapOutput, weekNumber)
+      const exampleRows = await db.select().from(dietPlanExamplesTable)
+      const examplesForRetrieval: DietPlanExampleForRetrieval[] = exampleRows.map((row) => ({
+        slug: row.slug,
+        goal: row.goal,
+        dietTypes: row.dietTypes,
+        region: row.region,
+        gender: row.gender,
+        calorieMin: row.calorieMin,
+        calorieMax: row.calorieMax,
+        mealCount: row.mealCount,
+        // jsonb column, untyped in schema.ts (same convention as
+        // rawCsvRow/validationResult elsewhere) — the real shape is owned
+        // by diet-plan-example-markdown-parser.ts's ParsedMealSlot.
+        mealStructure: row.mealStructure as ParsedMealSlot[],
+        reasoning: row.reasoning,
+        weight: row.weight,
+        sourceType: row.sourceType,
+        estimatedTokens: row.estimatedTokens,
+      }))
+      const exampleRetrieval = retrieveDietPlanExamples(examplesForRetrieval, {
+        goal,
+        dietType,
+        cuisine,
+        dailyTargetKcal: dailyRecipeTarget.kcal,
+        mealCount,
+      })
+      dietPlanExamples = exampleRetrieval.examples
+      dietPlanExamplesDroppedForBudget = exampleRetrieval.droppedForBudget
+      if (dietPlanExamplesDroppedForBudget.length > 0) {
+        console.warn(
+          `Diet plan example retrieval dropped ${dietPlanExamplesDroppedForBudget.length} example(s) for token budget:`,
+          dietPlanExamplesDroppedForBudget
+        )
+      }
+    }
+
     return generateRecipeEnginePlan({
       user,
       roadmapId,
@@ -636,6 +768,10 @@ export async function POST(request: Request) {
       dailyTarget: dailyRecipeTarget,
       dietType,
       clientRecipeAllergenTags,
+      knowledgeChunks,
+      knowledgeDroppedForBudget,
+      dietPlanExamples,
+      dietPlanExamplesDroppedForBudget,
     })
   }
 

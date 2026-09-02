@@ -1,60 +1,81 @@
 import { describe, expect, it } from "vitest"
 
-import { formatRecipeQuantity } from "./recipe-quantity-display"
+import { formatRecipeQuantity, portionSizeReferenceText } from "./recipe-quantity-display"
 
-describe("formatRecipeQuantity", () => {
-  it("shows a bare count for Fruit, no unit word", () => {
-    expect(formatRecipeQuantity({ name: "Apple", category: "Fruit", unitLabel: "piece", perUnitGrams: 150 }, 245)).toBe("2")
+describe("formatRecipeQuantity — container scale (tier 3)", () => {
+  it("buckets by the specified thresholds", () => {
+    const dal = { name: "Lentil Soup", category: "Dal", unitLabel: "bowl", perUnitGrams: 150 }
+    expect(formatRecipeQuantity(dal, 20)).toBe("spoonful, 20 g")
+    expect(formatRecipeQuantity(dal, 85)).toBe("small serving, 85 g")
+    expect(formatRecipeQuantity(dal, 150)).toBe("small bowl, 150 g")
+    expect(formatRecipeQuantity(dal, 255)).toBe("bowl, 255 g")
+    expect(formatRecipeQuantity(dal, 380)).toBe("large bowl, 380 g")
+    expect(formatRecipeQuantity(dal, 500)).toBe("plate, 500 g")
   })
 
-  it("rounds to the nearest whole piece and pluralizes", () => {
-    expect(formatRecipeQuantity({ name: "Roti", category: "Bread", unitLabel: "piece", perUnitGrams: 40 }, 105)).toBe("3 pieces")
+  it("treats each threshold as inclusive of its upper bound", () => {
+    const dal = { name: "Lentil Soup", category: "Dal", unitLabel: "bowl", perUnitGrams: 150 }
+    expect(formatRecipeQuantity(dal, 40)).toBe("spoonful, 40 g")
+    expect(formatRecipeQuantity(dal, 41)).toBe("small serving, 41 g")
+    expect(formatRecipeQuantity(dal, 100)).toBe("small serving, 100 g")
+    expect(formatRecipeQuantity(dal, 101)).toBe("small bowl, 101 g")
+    expect(formatRecipeQuantity(dal, 450)).toBe("large bowl, 450 g")
+    expect(formatRecipeQuantity(dal, 451)).toBe("plate, 451 g")
   })
 
-  it("keeps singular for a count of 1", () => {
-    expect(formatRecipeQuantity({ name: "Roti", category: "Bread", unitLabel: "piece", perUnitGrams: 40 }, 45)).toBe("1 piece")
+  it("routes a vessel/stray source noun through the container scale, NOT through that noun — this is the whole point of the change", () => {
+    // Previously these rendered "1 katori" / "2 glasses" / "2 rices".
+    expect(formatRecipeQuantity({ name: "Kokum Sherbet", category: "Water Beverage", unitLabel: "glass", perUnitGrams: 200 }, 400)).toBe("large bowl, 400 g")
+    expect(formatRecipeQuantity({ name: "Kuttu Kadhi With Samak Chawal (Navratri Special)", category: "Curry + Rice", unitLabel: "rice", perUnitGrams: 330 }, 470)).toBe("plate, 470 g")
+    expect(formatRecipeQuantity({ name: "Cauliflower Curry", category: "Sabzi", unitLabel: "cup", perUnitGrams: 100 }, 190)).toBe("small bowl, 190 g")
   })
 
-  it("pluralizes a vessel-noun unit normally (cup -> cups)", () => {
-    expect(formatRecipeQuantity({ name: "Masala Chai", category: "Tea", unitLabel: "cup", perUnitGrams: 150 }, 320)).toBe("2 cups")
+  it("handles a recipe with no per-unit data at all (Green Apple) — container scale, never a fabricated piece count", () => {
+    expect(formatRecipeQuantity({ name: "Green Apple", category: "Fruit", unitLabel: null, perUnitGrams: null }, 185)).toBe("small bowl, 185 g")
   })
 
-  it("uses the irregular plural for glass (glass -> glasses)", () => {
-    expect(formatRecipeQuantity({ name: "Orange Juice", category: "Juice", unitLabel: "glass", perUnitGrams: 200 }, 450)).toBe("2 glasses")
+  it("never returns null — the container scale covers any gram figure", () => {
+    expect(formatRecipeQuantity({ name: "Grilled Chicken", category: "Heavy Meal", unitLabel: null, perUnitGrams: null }, 150)).toBe("small bowl, 150 g")
+  })
+})
+
+describe("formatRecipeQuantity — discrete pieces (tier 2)", () => {
+  it("counts by the recipe's own real per-piece weight", () => {
+    expect(formatRecipeQuantity({ name: "Masala Dosa", category: "Dosa", unitLabel: "piece", perUnitGrams: 97 }, 115)).toBe("1 piece, 115 g")
+    expect(formatRecipeQuantity({ name: "Roti", category: "Roti", unitLabel: "piece", perUnitGrams: 40 }, 105)).toBe("3 pieces, 105 g")
+    expect(formatRecipeQuantity({ name: "Plain Rava Idli", category: "Idli", unitLabel: "piece", perUnitGrams: 60 }, 180)).toBe("3 pieces, 180 g")
   })
 
-  it("never pluralizes an abbreviation like tbsp", () => {
-    expect(formatRecipeQuantity({ name: "Guacamole", category: "Dip", unitLabel: "tbsp", perUnitGrams: 15 }, 45)).toBe("3 tbsp")
+  it("keeps singular at a count of 1 and never rounds down to zero", () => {
+    expect(formatRecipeQuantity({ name: "Ragi Roti", category: "Roti", unitLabel: "piece", perUnitGrams: 70 }, 80)).toBe("1 piece, 80 g")
+    expect(formatRecipeQuantity({ name: "Cashew", category: "Nuts", unitLabel: "piece", perUnitGrams: 40 }, 5)).toBe("1 piece, 5 g")
+  })
+})
+
+describe("formatRecipeQuantity — whole fruit by the piece (tier 1)", () => {
+  it("counts Apple and Banana under their own name", () => {
+    expect(formatRecipeQuantity({ name: "Apple", category: "Fruit", unitLabel: "bowl", perUnitGrams: 150 }, 150)).toBe("1 apple, 150 g")
+    expect(formatRecipeQuantity({ name: "Apple", category: "Fruit", unitLabel: "bowl", perUnitGrams: 150 }, 300)).toBe("2 apples, 300 g")
+    expect(formatRecipeQuantity({ name: "Banana", category: "Fruit", unitLabel: "bowl", perUnitGrams: 150 }, 230)).toBe("2 bananas, 230 g")
   })
 
-  it("never rounds down to zero, even for a tiny gram amount", () => {
-    expect(formatRecipeQuantity({ name: "Cashew", category: "Nuts", unitLabel: "piece", perUnitGrams: 40 }, 5)).toBe("1 piece")
+  it("uses the ingested per-piece weight for a Fruit row the source already counts by the piece, under its own name", () => {
+    expect(formatRecipeQuantity({ name: "Mango", category: "Fruit", unitLabel: "piece", perUnitGrams: 250 }, 250)).toBe("1 mango, 250 g")
+    expect(formatRecipeQuantity({ name: "Peach", category: "Fruit", unitLabel: "piece", perUnitGrams: 150 }, 300)).toBe("2 peaches, 300 g")
   })
 
-  it("returns null when the recipe has no derivable unit, so the caller can fall back to grams", () => {
-    expect(formatRecipeQuantity({ name: "Grilled Chicken", category: "Heavy Meal", unitLabel: null, perUnitGrams: null }, 150)).toBeNull()
+  it("does NOT generalise to every Fruit row — a mixed-fruit bowl and per-gram grapes stay on the container scale", () => {
+    expect(formatRecipeQuantity({ name: "All-Season Mix Fruit Bowl", category: "Fruit", unitLabel: "cup", perUnitGrams: 200 }, 200)).toBe("small bowl, 200 g")
+    expect(formatRecipeQuantity({ name: "Grapes", category: "Fruit", unitLabel: "g", perUnitGrams: 1 }, 120)).toBe("small bowl, 120 g")
+    expect(formatRecipeQuantity({ name: "Papaya", category: "Fruit", unitLabel: "cup", perUnitGrams: 200 }, 300)).toBe("bowl, 300 g")
   })
+})
 
-  it("defaults to 'piece' when unitLabel is missing but perUnitGrams is present", () => {
-    expect(formatRecipeQuantity({ name: "Some Snack", category: "Snack", unitLabel: null, perUnitGrams: 30 }, 90)).toBe("3 pieces")
-  })
-
-  it("does not double-pluralize a noun that was already plural as scraped, when it doesn't happen to match the recipe's own name", () => {
-    // "Trail Mix" quantified as "10 almonds" -> unitLabel "almonds" (already
-    // plural) — doesn't share a word with the recipe name, so the bare-count
-    // rule doesn't apply here; this isolates the pluralizer's own behavior.
-    expect(formatRecipeQuantity({ name: "Trail Mix", category: "Nuts", unitLabel: "almonds", perUnitGrams: 0.8 }, 50)).toBe("63 almonds")
-  })
-
-  it("when the already-plural noun DOES match the recipe's own name, the bare-count rule takes over instead (also correct, just a different path)", () => {
-    expect(formatRecipeQuantity({ name: "Peanuts", category: "Nuts", unitLabel: "peanuts", perUnitGrams: 0.8 }, 50)).toBe("63")
-  })
-
-  it("falls back to a bare count when the derived unit word repeats the recipe's own name (Rice -> 1, not 1 rice)", () => {
-    expect(formatRecipeQuantity({ name: "Rice", category: "Rice", unitLabel: "rice", perUnitGrams: 200 }, 230)).toBe("1")
-  })
-
-  it("bare-count fallback is case-insensitive and matches on a whole word", () => {
-    expect(formatRecipeQuantity({ name: "Jeera Rice", category: "Rice", unitLabel: "Rice", perUnitGrams: 200 }, 230)).toBe("1")
+describe("portionSizeReferenceText", () => {
+  it("states every bucket in the scale", () => {
+    const text = portionSizeReferenceText()
+    for (const label of ["spoonful", "small serving", "small bowl", "bowl", "large bowl", "plate"]) {
+      expect(text).toContain(label)
+    }
   })
 })

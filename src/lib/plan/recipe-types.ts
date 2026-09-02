@@ -1,7 +1,9 @@
 import type { Recipe } from "@/db/schema"
 import type { RecipeCuisine } from "@/lib/foods/recipe-cuisine-mapping"
 
+import type { RetrievedDietPlanExample } from "./diet-plan-example-retrieval"
 import type { DietType } from "./exchange-solver"
+import type { RetrievedKnowledgeChunk } from "./knowledge-retrieval"
 import type { AchievedMacros } from "./table-4-1"
 
 /** AchievedMacros widened with fiber — a soft target, tracked and logged, never a hard reject-gate (see recipe-validate.ts). */
@@ -23,15 +25,28 @@ export interface MealSlotInfo {
   timeHint: string | null
 }
 
-/** Denormalized recipe row shape the LLM prompt table actually needs — no serving-limit columns, since the LLM never proposes grams. */
+/**
+ * Denormalized recipe row shape the recipe-selection layer needs — no
+ * serving-limit columns, since the LLM never proposes grams. Used for both
+ * the LLM prompt table (recipe-prompt.ts) and the deterministic fallback
+ * selector's own reasoning (recipe-selector-fallback.ts) — the pairing
+ * fields below are read by both.
+ */
 export interface RecipeForPrompt {
   id: string
   name: string
   category: string
+  /** 'liquid' | 'solid' | null — see recipe-consistency-normalize.ts. Rendered in the prompt table as an extra guard against a soup/tea being picked as a meal's anchor. */
+  consistency: string | null
   mainOrMid: "main" | "mid"
   cuisine: string
   macroCategory: string | null
   commonality: number
+  /** Dietitian-authored pairing data — see recipe-pairing.ts. "Must have" is a hard plausibility gate; "good to have" is prompt-visible guidance only. */
+  mustHaveCategories: string[]
+  goodToHaveCategories: string[]
+  mustHaveRecipeNames: string[]
+  goodToHaveRecipeNames: string[]
   proteinPer100G: number
   carbsPer100G: number
   fatPer100G: number
@@ -53,6 +68,10 @@ export interface RecipeSelectorInput {
   aliasRows: { recipeId: string; alias: string }[]
   dayIndexOffset?: number
   previousWeekLastDayRecipeNames?: Record<string, string[]>
+  /** Dietitian Knowledge RAG layer's retrieved chunks (gated by DIETITIAN_KNOWLEDGE_ENABLED) — descriptive prompt text only, never a number. See CLAUDE.md "Dietitian knowledge layer". */
+  knowledgeChunks?: RetrievedKnowledgeChunk[]
+  /** Diet Plan Examples RAG layer's retrieved examples (gated by DIET_PLAN_EXAMPLES_ENABLED) — descriptive prompt text only, ranked ABOVE knowledgeChunks in the rendered prompt. See CLAUDE.md "Diet plan examples layer". */
+  dietPlanExamples?: RetrievedDietPlanExample[]
 }
 
 // LLM-selected (name only, no grams ever)

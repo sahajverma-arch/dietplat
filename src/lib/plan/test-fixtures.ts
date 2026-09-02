@@ -43,9 +43,18 @@ export function makeRecipe(overrides: Partial<Recipe> = {}): Recipe {
     category: overrides.category ?? "Sabzi",
     macroCategory: overrides.macroCategory ?? null,
     heavyLight: overrides.heavyLight ?? "light",
+    // `?? "solid"` would silently replace an explicit `consistency: null`
+    // override (a legitimate test value — "no data") with "solid", since
+    // `??` treats null and undefined the same way — compare against
+    // undefined directly instead, so an explicit null passes through.
+    consistency: overrides.consistency === undefined ? "solid" : overrides.consistency,
     mainOrMid: overrides.mainOrMid ?? "main",
     commonality: overrides.commonality ?? 1,
     priority: overrides.priority ?? "primary",
+    mustHaveCategories: overrides.mustHaveCategories ?? [],
+    goodToHaveCategories: overrides.goodToHaveCategories ?? [],
+    mustHaveRecipeNames: overrides.mustHaveRecipeNames ?? [],
+    goodToHaveRecipeNames: overrides.goodToHaveRecipeNames ?? [],
     season: overrides.season ?? "all_year",
     allergenTags: overrides.allergenTags ?? [],
     minGrams: overrides.minGrams ?? 50,

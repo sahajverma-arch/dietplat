@@ -19,12 +19,17 @@ const COL = {
   MACRO_CATEGORY: 12,
   HEAVY_LIGHT: 15,
   CUISINE: 17,
+  CONSISTENCY: 28, // "Liquid" | "Solid" — see recipe-consistency-normalize.ts
   COMMONALITY: 19,
   QUANTITY_PER_SERVING: 33,
   MAXIMUM_QUANTITY: 43,
   MIN_QUANTITY: 44,
   RECIPE_ID: 45,
   MAIN_MID: 46,
+  MUST_HAVE_CATEGORY: 54,
+  GOOD_TO_HAVE_CATEGORY: 55,
+  MUST_HAVE_RECIPE: 56,
+  GOOD_TO_HAVE_RECIPE: 57,
   IS_MEASURED_IN: 47,
   WT_OF_MEASURED_AMT: 48,
   CARBS_PER_100G: 49,
@@ -45,11 +50,16 @@ export interface RawRecipeRow {
   macroCategoryRaw: string
   heavyLightRaw: string
   cuisineRaw: string
+  consistencyRaw: string
   commonalityRaw: string
   quantityPerServingRaw: string
   maximumQuantityRaw: string
   minQuantityRaw: string
   mainOrMidRaw: string
+  mustHaveCategoryRaw: string
+  goodToHaveCategoryRaw: string
+  mustHaveRecipeRaw: string
+  goodToHaveRecipeRaw: string
   isMeasuredInRaw: string
   wtOfMeasuredAmtRaw: string
   proteinPer100G: number
@@ -82,11 +92,16 @@ function toRawRow(r: string[]): RawRecipeRow {
     macroCategoryRaw: r[COL.MACRO_CATEGORY].trim(),
     heavyLightRaw: r[COL.HEAVY_LIGHT].trim(),
     cuisineRaw: r[COL.CUISINE].trim(),
+    consistencyRaw: r[COL.CONSISTENCY].trim(),
     commonalityRaw: r[COL.COMMONALITY].trim(),
     quantityPerServingRaw: r[COL.QUANTITY_PER_SERVING].trim(),
     maximumQuantityRaw: r[COL.MAXIMUM_QUANTITY].trim(),
     minQuantityRaw: r[COL.MIN_QUANTITY].trim(),
     mainOrMidRaw: r[COL.MAIN_MID].trim(),
+    mustHaveCategoryRaw: r[COL.MUST_HAVE_CATEGORY].trim(),
+    goodToHaveCategoryRaw: r[COL.GOOD_TO_HAVE_CATEGORY].trim(),
+    mustHaveRecipeRaw: r[COL.MUST_HAVE_RECIPE].trim(),
+    goodToHaveRecipeRaw: r[COL.GOOD_TO_HAVE_RECIPE].trim(),
     isMeasuredInRaw: r[COL.IS_MEASURED_IN].trim(),
     wtOfMeasuredAmtRaw: r[COL.WT_OF_MEASURED_AMT].trim(),
     proteinPer100G: parseFloat(r[COL.PROTEIN_PER_100G]) || 0,

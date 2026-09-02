@@ -25,6 +25,26 @@ const envSchema = z.object({
     .string()
     .optional()
     .transform((v) => v === "true"),
+  // Rollout flag for the Dietitian Knowledge RAG layer (see CLAUDE.md
+  // "Dietitian knowledge layer") — defaults OFF, same polarity/reasoning as
+  // RECIPE_ENGINE_ENABLED: a new, unproven layer on top of an already
+  // convergence-fragile 8B model, not an established one being rolled back.
+  // Independent of RECIPE_ENGINE_ENABLED — both must be on for knowledge
+  // retrieval to actually run, since it only wires into the recipe engine.
+  DIETITIAN_KNOWLEDGE_ENABLED: z
+    .string()
+    .optional()
+    .transform((v) => v === "true"),
+  // Rollout flag for the Diet Plan Examples RAG layer (see CLAUDE.md "Diet
+  // plan examples layer") — defaults OFF, same reasoning as
+  // DIETITIAN_KNOWLEDGE_ENABLED: a second, unproven layer on an already
+  // convergence-fragile 8B model. Independent of DIETITIAN_KNOWLEDGE_ENABLED
+  // so each layer's real impact can be isolated in testing — both still
+  // require RECIPE_ENGINE_ENABLED to mean anything.
+  DIET_PLAN_EXAMPLES_ENABLED: z
+    .string()
+    .optional()
+    .transform((v) => v === "true"),
 })
 
 const parsed = envSchema.safeParse({
@@ -36,6 +56,8 @@ const parsed = envSchema.safeParse({
   NVIDIA_MODEL: process.env.NVIDIA_MODEL,
   ARCHETYPE_SELECTION_ENABLED: process.env.ARCHETYPE_SELECTION_ENABLED,
   RECIPE_ENGINE_ENABLED: process.env.RECIPE_ENGINE_ENABLED,
+  DIETITIAN_KNOWLEDGE_ENABLED: process.env.DIETITIAN_KNOWLEDGE_ENABLED,
+  DIET_PLAN_EXAMPLES_ENABLED: process.env.DIET_PLAN_EXAMPLES_ENABLED,
 })
 
 if (!parsed.success) {

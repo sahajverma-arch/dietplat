@@ -1,0 +1,23 @@
+---
+id: south-24
+goal: maintenance
+dietTypes: [vegetarian, eggetarian]
+region: South Indian
+gender: any
+calorieMin: 1900
+calorieMax: 1900
+mealCount: 4
+dayLabel: null
+condition: []
+sourceType: synthetic
+sourceUrl: null
+sourceCredibility: null
+status: draft
+weight: 4
+---
+
+## Meal Structure
+- Breakfast: Dosa; Sambar
+- Lunch: Rice; Rasam
+- Snack: Coconut Water
+- Dinner: Vegetable Soup

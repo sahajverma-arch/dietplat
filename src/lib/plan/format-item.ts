@@ -22,9 +22,10 @@ const INDIVISIBLE_EXCHANGE_TYPES = new Set(["meat", "meat_lean"])
 // Dry fruits (Almonds, Walnut — exchangeType "fat") are unaffected either
 // way, since they carry a real servingRawG and never reach this branch.
 export function formatItemQuantity(item: PlanViewItem): string {
-  // Recipe-engine item with a derivable natural unit — a direct dietitian
-  // correction: "Roti 105 g" isn't how anyone plates food, "2-3 rotis" is.
-  // No grams shown alongside — the confirmed choice for this format.
+  // Recipe-engine item — a direct dietitian correction: "Roti 105 g" isn't
+  // how anyone plates food, "3 pieces" is. The label already carries its own
+  // gram figure ("bowl, 205 g"), since a container word on its own isn't
+  // actionable without it — see recipe-quantity-display.ts.
   if (item.quantityLabel) {
     return item.quantityLabel
   }

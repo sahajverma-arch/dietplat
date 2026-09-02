@@ -28,11 +28,20 @@ describe("parseRecipeCsv", () => {
         CARBS_PER_100G: "20",
         FAT_PER_100G: "6",
         FIBER_PER_100G: "2",
+        CONSISTENCY: "Solid",
       }),
     ].join("\n")
     const result = parseRecipeCsv(csv)
     expect(result.rows).toHaveLength(1)
-    expect(result.rows[0]).toMatchObject({ name: "Aloo Paratha", recipeId: "id-1", proteinPer100G: 5, carbsPer100G: 20, fatPer100G: 6, fiberPer100G: 2 })
+    expect(result.rows[0]).toMatchObject({
+      name: "Aloo Paratha",
+      recipeId: "id-1",
+      proteinPer100G: 5,
+      carbsPer100G: 20,
+      fatPer100G: 6,
+      fiberPer100G: 2,
+      consistencyRaw: "Solid",
+    })
     expect(result.duplicates).toEqual([])
     expect(result.garbageRowCount).toBe(0)
   })
@@ -75,6 +84,26 @@ describe("parseRecipeCsv", () => {
     expect(result.duplicates).toHaveLength(1)
     expect(result.duplicates[0].name).toBe("Mystery Dish")
     expect(result.duplicates[0].rows).toHaveLength(2)
+  })
+
+  it("parses the four Must/Good-to-have Category/Recipe pairing columns", () => {
+    const csv = [
+      makeHeader(),
+      makeRow({
+        RECIPE_NAME: "Dahi Tadka",
+        MUST_HAVE_CATEGORY: '"Pulao, Khichdi, Biryani"',
+        GOOD_TO_HAVE_CATEGORY: '"Chila, Thepla"',
+        MUST_HAVE_RECIPE: "",
+        GOOD_TO_HAVE_RECIPE: "",
+      }),
+    ].join("\n")
+    const result = parseRecipeCsv(csv)
+    expect(result.rows[0]).toMatchObject({
+      mustHaveCategoryRaw: "Pulao, Khichdi, Biryani",
+      goodToHaveCategoryRaw: "Chila, Thepla",
+      mustHaveRecipeRaw: "",
+      goodToHaveRecipeRaw: "",
+    })
   })
 
   it("skips a blank-name row", () => {

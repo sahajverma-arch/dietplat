@@ -29,4 +29,23 @@ describe("recipeCategoryBucket", () => {
   it("falls back to other for an unrecognized category", () => {
     expect(recipeCategoryBucket("Something Entirely Novel")).toBe("other")
   })
+
+  it("buckets a 'Sabzi'-category dish named '...Curry' as dal_curry (real regression: Rajma Curry, Kala Chana Curry, White Chana Curry are all Category=Sabzi)", () => {
+    expect(recipeCategoryBucket("Sabzi", "Rajma Curry")).toBe("dal_curry")
+    expect(recipeCategoryBucket("Sabzi", "Kala Chana Curry")).toBe("dal_curry")
+    expect(recipeCategoryBucket("Sabzi", "Cauliflower Curry")).toBe("dal_curry")
+  })
+
+  it("keeps a genuinely dry 'Sabzi'-category dish (no 'curry' in the name) bucketed as sabzi", () => {
+    expect(recipeCategoryBucket("Sabzi", "Karela Sabzi")).toBe("sabzi")
+    expect(recipeCategoryBucket("Sabzi", "Bhindi Masala")).toBe("sabzi")
+  })
+
+  it("still buckets Sabzi as sabzi when no name is supplied (backward compatible)", () => {
+    expect(recipeCategoryBucket("Sabzi")).toBe("sabzi")
+  })
+
+  it("matches the curry-name check case-insensitively", () => {
+    expect(recipeCategoryBucket("Sabzi", "rajma CURRY")).toBe("dal_curry")
+  })
 })

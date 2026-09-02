@@ -1215,6 +1215,25 @@ manual-override affordance in v1 (a `roadmapOverrides`-style "save anyway" was d
 built) — ship exactly what was asked for, and add an override only if real rejection rate turns out
 to be an operational problem, not pre-emptively.
 
+**A serving-limit hit is advisory, not blocking (2026-08-25 fix).** The three checks above are the
+whole gate; `cappedRecipeNames` — a recipe landing within `CAP_MARGIN_G` (2 g) of its own authored
+min/max — is deliberately NOT among them. It used to be, and that was an unintended dead-end rather
+than a decision: caps were absent from `dayNeedsRetry()` but present in the final gate's
+`diagnoseDay()`, so a day whose ONLY flaw was a capped serving was never selected for retry, yet
+still rejected the whole plan — a failure the retry loop was structurally incapable of repairing.
+The giveaway was `selectRecipes()`'s own `warnings` block: it collects exactly these capped names and
+was provably unreachable with anything in it, since any capped day threw first. Real serving data
+makes this bite constantly rather than rarely — of 1222 ingested recipes, 18% have a zero-width range
+(`min == max`, so they trip the check no matter what the balancer does) and only 15% have real
+headroom in both directions; in a single cuisine pool it is worse (48 of 416 for North Indian
+non-veg). The split now lives in `recipe-day-diagnosis.ts` (extracted from `recipe-selector.ts` only
+so it is unit-testable — that file imports `nvidia-client.ts`, which validates server env at module
+load): `blockingProblems()` is the write gate and mirrors `dayNeedsRetry()` exactly, `diagnoseDay()`
+is a strict superset that still reports caps to the model on a retry, and caps now reach the returned
+`warnings` as originally designed. This is NOT a softening of the reject-on-failure ethos in the "Do
+not" list below — macro tolerance, plausibility and variety reject exactly as before; a check that
+could never be retried into compliance simply stopped being a gate.
+
 ### Fiber — soft target, still logged
 
 `weekTargets()` produces a real `fibreG` daily target, and the recipe engine is the first engine to
@@ -1260,6 +1279,363 @@ caller omits it entirely, so both existing UI callers (`actions-bar.tsx`, `plan-
 byte-identically unchanged — a caller wanting the recipe engine must pass `engine: "recipe"` and
 `cuisine` explicitly, which no UI does yet (a real, open follow-up, not solved here). Flip the flag
 locally only once live-generation testing at the relaxed 8% tolerance shows consistent convergence.
+
+## Dietitian knowledge layer
+
+By 2026-08-20, live testing on the recipe engine (real NVIDIA calls, both 8B-tier attempts this
+session) had already surfaced a problem one layer up from anything grounding/balancing/validation can
+fix: a plan can pass every existing check — macro tolerance, plausibility, variety, diet/allergen
+eligibility — and still not read like something a real Indian dietitian composed. Nothing in the
+pipeline up to that point had any concept of regional identity, common-vs-rare food pairings, or how
+a fat-loss week should be built differently from a muscle-gain one — `recipe-plausibility-validate.ts`
+and `recipe-variety-tracker.ts` only ever checked *structural* things (no duplicate recipe in a meal,
+no two heavy dishes stacked), never dietitian domain reasoning.
+
+This is a **separate knowledge base from `recipes`**, by design — the recipe table stays the sole
+source of truth for dish names and nutrition; this layer only ever adds descriptive guidance text to
+the prompt, never a recipe, a number, or a new field in the LLM's output contract. It is a genuine
+extension of "THE ONE RULE THAT MATTERS": the recipe engine already tightened that rule to "the LLM
+never proposes a gram, calorie, or macro number of any kind, ever"; this layer adds "and it now gets
+better *descriptive* material to reason with, not more numeric responsibility."
+
+### Recommendation: hybrid, not pure RAG, not fine-tuning, not pure rules
+
+Fine-tuning was rejected outright — no training/ML-ops infra exists anywhere in this stack (only an
+inference client), and a fine-tune cycle can't be corrected as fast, cheaply, or auditably as this
+project's own proven loop, visible throughout this entire file's history: a dietitian gives feedback,
+an engineer encodes it into a versioned source file, a seed script ingests it, this file records why.
+Pure hardcoded rules don't scale to "sounds like an experienced dietitian" nuance on their own, but
+they stay essential as the backstop that was already there. Pure RAG with no backstop was rejected
+too — this session's own live NVIDIA test already proved the current 8B model ignores explicit prompt
+instructions (the variety-cap rule was ignored, fat consistently ran low, all 7 days were rejected
+after retries) — a retrieved chunk is no more guaranteed to be obeyed than that was. The shipped design
+is a **hybrid**: this layer shapes the LLM's soft choices; `recipe-plausibility-validate.ts`,
+`recipe-variety-tracker.ts`, and `recipe-validate.ts`'s tolerance gate are **completely unmodified** by
+this layer and remain the only hard gate. A knowledge chunk whose guidance proves reliably necessary
+over time — dietitians keep correcting the same mistake even with it present — is a candidate to
+graduate into a new hardcoded plausibility check later, mirroring this project's own repeated history
+(the `salad` tag → hard pool exclusion; `cooking_fat`/`no_cooking_fat` → hard degrade rule for Oats).
+Not attempted yet — just the same open path this file already documents elsewhere.
+
+### Data model — a separate knowledge base, not more recipe metadata
+
+Three new tables, purely additive: `dietitian_knowledge_docs` (one row per source markdown file —
+`slug`, `title`, `category` from a fixed 10-value enum, `status: draft|confirmed`, `version`,
+`confirmedBy`/`confirmedAt`, and the four retrieval-filter arrays `regions`/`dietTypes`/`goals`/
+`mealSlots`), `dietitian_knowledge_chunks` (one row per markdown H2 section — the actual
+retrieval/injection unit), and `dietitian_knowledge_embeddings` — an unpopulated v2 placeholder,
+mirroring `recipe_embeddings`' own exact precedent (same 1536-dim column, same "no ANN index until a
+model is chosen" posture), not wired into anything in v1. `plan_generation_runs` gained a nullable
+`knowledge_chunks_injected jsonb` audit column, sibling to its existing nullable `raw_response`/`model`
+columns — `{injected: [...], droppedForBudget: [...]}` chunk slugs, so a dietitian can trace which
+knowledge shaped a specific generated plan, without needing to snapshot knowledge content onto
+`diet_plans` itself (knowledge is guidance, not a numeric fact the way recipe macros are).
+
+An `EMPTY filter array means "applies universally"` — the exact same wildcard convention
+`foods.seasons`'s `"all_year"` already established. `regions` values reuse the exact `RecipeCuisine`
+strings already flowing through `RecipeSelectorInput.cuisine`, not a second region vocabulary.
+
+### Ingestion — `npm run seed:knowledge`
+
+Source: `src/db/seed-data/dietitian-knowledge/**/*.md`, 27 files, file-per-region + file-per-topic
+(not file-per-region-per-topic — a dietitian correcting "Punjabi" should edit exactly one file).
+`knowledge-markdown-parser.ts` is a hand-rolled frontmatter + H2-chunk parser — no markdown/YAML
+dependency exists in this stack (confirmed: no `gray-matter`/`remark`/`unified`/`js-yaml` in
+`package.json`), and the frontmatter here is flat scalars/arrays only, genuinely simple to split on
+`---` fences with a line scan, matching this codebase's revealed preference for small hand-rolled
+parsers (see `csv-parser.ts`'s own quoted-CSV state machine) over a new dependency. Each markdown
+**H2 section is one chunk** (~50-200 words, an authoring target the parser warns on but never fails
+for); a doc whose sections genuinely need different retrieval filters should be split into separate
+files rather than grow per-heading frontmatter, which was deliberately never built.
+
+`seed-knowledge.ts` mirrors `seed-recipes.ts`'s exact shape: manual `select`-into-a-Map upsert-by-slug
+(never `.onConflictDoUpdate()`), chunks recomputed fresh every run (delete-then-reinsert per doc,
+mirroring how `recipe_aliases`' generated rows are recomputed fresh every `seed-recipes.ts` run), a
+hard `process.exit(1)` refusal on a duplicate frontmatter `id` across files (the same class of guard
+as `seed-recipes.ts`'s duplicate-name refusal), and a warnings banner printed after the loop.
+
+A real bug the parser needed a second pass to catch, found only by inspecting the *actual rendered
+prompt* (not just the seed script's own diagnostics, which had nothing to flag): every file's closing
+`**UNVERIFIED — pending dietitian confirmation.**` disclosure line — the same disclosure convention
+this file already uses for every unconfirmed food/recipe addition — was being authored inside whichever
+H2 section happened to be a doc's last, so it flowed straight into that chunk's retrieved `content` and
+showed up as a stray bullet in the middle of the LLM's guidance list. Fixed by stripping the literal
+disclosure line out of chunk `content` at parse time (`DISCLOSURE_LINE` regex in
+`knowledge-markdown-parser.ts`) — the full, unstripped markdown is still preserved verbatim in
+`raw_markdown` for a human auditor. The disclosure is for a person reading the source file, never for
+the model.
+
+All 27 files ship `status: draft`, `confirmedBy: null` — content drafted from well-established,
+broadly-agreed Indian-dietetics patterns (roti/rice-dal-sabzi as the lunch/dinner backbone, regional
+staple identities, standard katori/roti/cup serving language already surfaced via `recipes.unitLabel`),
+never invented statistics or fake citations, and explicitly not presented as dietitian-validated ground
+truth until a real review pass flips each file's `status` to `confirmed` in small batches.
+
+### Retrieval — deterministic tag filter (v1), no embeddings
+
+`knowledge-retrieval.ts`'s `retrieveKnowledgeChunks()` is the same tiered-deferral philosophy the
+recipe engine's own grounding resolver already established (exact → alias → fuzzy → **null**, the
+explicit seam for a deferred v2 embedding tier) applied one level up: v1 is deterministic
+tag/metadata filtering only, no semantic search, because no embedding provider is confirmed available
+and this dataset's filter dimensions (cuisine/dietType/goal/mealSlot) cover real usage cleanly enough
+to not need one yet. A doc is a retrieval candidate when every one of its non-empty filter arrays
+intersects the request; candidates rank by specificity (how many filter dimensions are actually
+narrowed) → author-assigned `weight` (1-10, mirroring `recipes.commonality`/`priority`'s existing
+precedent as a ranking tie-breaker) → a deterministic `stableHash` tie-break — the same small per-file
+32-bit rolling hash already independently duplicated in `food-selector-fallback.ts` /
+`daily-macro-jitter.ts` / `archetype-selector.ts` / `mixed-veg-day.ts` / `recipe-selector-fallback.ts`,
+copied locally here too rather than extracted into a shared utility, matching this codebase's explicit,
+repeated choice not to share that helper. Chunks are greedily accepted in rank order until a
+**700-token budget** (`DEFAULT_KNOWLEDGE_TOKEN_BUDGET`) is spent — deliberately small, reasoned
+directly from the 8B model's already-documented convergence fragility on a *smaller* prompt than this
+layer adds to; a smaller lower-ranked chunk can still fit after a larger higher-ranked one is dropped
+(best-effort greedy, not a hard stop at the first miss). Nothing is ever silently dropped —
+`droppedForBudget` is returned, `console.warn`'d at generation time, and written into
+`plan_generation_runs.knowledge_chunks_injected` alongside what *was* injected.
+
+**A real starvation bug, found only by inspecting actual retrieved output on a real client, not by unit
+tests alone**: the first content pass authored `combinations-*`/`goals-*`/`meal-patterns-*` docs at
+`weight: 9` and every region doc at `weight: 7-8`. Since a region doc, a goal doc, and a meal-slot doc
+are each narrowed on exactly one filter dimension, they tie at specificity — so weight alone decided
+the ranking, and the weight-9 docs' combined chunk count already exceeded the 700-token budget on their
+own. The result: **no client's generated prompt ever received any region-specific guidance at all** —
+the flagship deliverable of this whole layer was silently starved out by unrelated higher-weight docs,
+every single time, for every cuisine. Confirmed on both Priya (Punjabi) and Rahul (South Indian) before
+the fix, and confirmed fixed after. Fixed by raising all 8 specific-region docs (not `general.md`,
+which stays lower — it's the deliberate no-strong-identity fallback) to `weight: 9`, matching the other
+flagship categories, so regional identity now competes on equal footing rather than losing by
+construction. This is a content-authoring correction, not a retrieval-algorithm redesign — the
+algorithm's deterministic ranking behaved exactly as designed; the inputs it was given were wrong.
+
+### Prompt integration
+
+`recipe-prompt.ts`'s `formatKnowledgeSection()` renders retrieved chunks as a `Dietitian guidance for
+this client:` bulleted block, inserted in both `buildInitialMessages()` and `buildDayRetryMessages()`
+at the identical spot — between the recipe table and the final instruction line, so the model sees its
+full recipe pool before being told to compose/choose, with the guidance framing that choice rather than
+preceding it. Absent or empty `knowledgeChunks` renders `""` and the prompt is byte-identical to before
+this layer existed — a dedicated regression test asserts this directly, not just informally. One static
+bullet was appended to `SYSTEM_PROMPT`'s existing Rules list framing the guidance as advisory,
+"alongside (never instead of) the recipe table and targets" — never a new instruction the model could
+mistake for a reason to override the recipe list or the numeric targets it's already told never to
+touch. `recipe-schema.ts` — the LLM's actual output contract — is completely untouched.
+
+### Goal inference — an accepted proxy, not a dietitian-confirmed signal
+
+There is no `fat_loss`/`muscle_gain`/`maintenance` field anywhere in the roadmap/counselling pipeline
+— confirmed by a direct search before building anything, not assumed. `goal-inference.ts`'s
+`inferGoalFromRoadmap()` derives one purely for this layer's retrieval filter, comparing the week's
+`weekTargets(roadmap, weekNumber).kcal` against `roadmap.energy.tdee`: more than 5% under → `fat_loss`,
+more than 5% over → `muscle_gain`, otherwise `maintenance`. A new file, not a change inside
+`roadmap.ts` — the counselling engine itself stays untouched, and this stays an explicit, accepted v1
+simplification to revisit only if a real dietitian-confirmed goal field is ever added upstream.
+
+### Cuisine widening — Punjabi/Rajasthani/Hyderabadi, with a real limitation
+
+`RECIPE_CUISINES` (`recipe-cuisine-mapping.ts`) widened from 6 to 9 values to add Punjabi/Rajasthani/
+Hyderabadi, mirroring the exchange engine's 9-value `REGIONS` — needed because the user asked for
+Punjabi regional knowledge by name, and the recipe engine had no way to even request that cuisine
+before this. `meal_templates` already had all three seeded at `mealCount=5`
+(`20260809300000_five_more_regions.sql`, predating the recipe engine entirely) — zero new seed work
+there. `route.ts`'s `recipeRequestSchema` uses `z.enum(RECIPE_CUISINES)` directly, so it widened for
+free. **A real limitation, stated plainly, not hidden**: the raw recipe CSV has zero rows tagged
+Punjabi or Rajasthani cuisine, and its one Hyderabadi hit is inside a dish *name* ("Hyderabadi
+Biryani"), not the `Cuisine` column — confirmed directly against `recipe-cuisine-mapping.ts`'s own
+15-value distribution profile before widening anything. The widening is safe (`eligibleCuisinesFor()`
+always folds in `"General"`, so nothing can resolve to zero eligible recipes) but does **not** unlock a
+native recipe pool for these three regions — they draw from the same 762-recipe General pool as every
+other cuisine's fallback. This knowledge layer's docs for Punjabi/Rajasthani/Hyderabadi are therefore
+the *only* region-specific signal anywhere in the recipe-engine pipeline for them; backfilling
+`recipes.cuisine` for an identifiable subset is real, explicit follow-up work, not attempted here.
+
+### Rollout
+
+`DIETITIAN_KNOWLEDGE_ENABLED` defaults off everywhere, same polarity and reasoning as
+`RECIPE_ENGINE_ENABLED` — a new, unproven layer stacked on an already convergence-fragile 8B model, not
+an established one being rolled back. It only takes effect when `RECIPE_ENGINE_ENABLED` is also on;
+this layer has no meaning for the exchange engine and never touches it. Verified end-to-end without
+spending a live LLM call: loaded a real client's roadmap, ran real retrieval against the seeded
+knowledge base, and rendered the real `buildInitialMessages()` output directly — confirmed genuine
+Punjabi-specific content (Makkhan/ghee as an everyday fat, Sarson da saag/makki di roti as a named
+seasonal pairing) appears in the actual rendered prompt for a real Punjabi client, and equivalent
+region-specific content for a South Indian client, after the weight-starvation fix above. Flip the flag
+locally only once the initial draft content has had a real dietitian review pass.
+
+## Diet plan examples layer
+
+Direct feedback on the knowledge layer above: it's "still too theoretical." A dietitian doesn't reason
+from isolated rules ("Punjabis eat parathas") — they think in **complete meal patterns for a specific
+client profile**. This is a SECOND, independent RAG layer — not a modification of the knowledge layer,
+a parallel one — that retrieves and injects complete real example days as few-shot precedent, so the
+LLM sees not just *how dietitians think* (knowledge layer) but *what dietitians actually build* (this
+layer), in that order, with examples explicitly ranked above the general principles when the two
+disagree. `recipe-schema.ts` is untouched; nothing here is ever grounded against `recipes`.
+
+### Real-content sourcing — a real blocker, resolved directly with the user
+
+There is no real, dietitian-authored diet plan anywhere in this environment. Investigated directly: the
+"Deepak Sharma/Anjali Joshi/Ritu Verma" plans this file's own exchange-system history calls "real
+generated diet plans" turned out to be machine-generated PDFs from synthetic, fabricated intake data —
+a sister repo's own quick-client test script seeded fake names/ages/phone numbers and ran them through
+the deterministic pipeline. Useful once for verifying Table 4.1 arithmetic, not genuine clinical source
+material. Flagged to the user rather than silently substituted with fabricated content. Confirmed
+direction: **use the internet to find real examples.** Two parallel web-research passes found 17 real,
+credible, structured, quantified full-day Indian diet plan examples from named/credentialed sources —
+registered dietitians (Dietburrp/RD Payal Banka, 15yr experience), hospital nutrition departments
+(Apollo247/Dr. Pondugula MBBS, CK Birla Hospital/Ms. Deepali Sharma PG Dietetics), and established
+platforms with named credentialed reviewers (Netmeds/M Sowmya Binu, Fitelo/Varleen Kaur qualified
+dietitian) — spanning fat-loss, muscle-gain, and maintenance goals across multiple regions and calorie
+ranges, each with a real source URL and credibility note retained for audit.
+
+Separately, the user pasted a ~30-item batch of fabricated placeholder examples (generic "Roti + Dal +
+Sabzi" patterns, no source) and asked for more to be generated — directly conflicting with their own
+"use real examples" direction from minutes earlier. Flagged rather than silently actioned. **Resolved**:
+both tiers ship. Real examples are the primary, always-preferred tier; the synthetic batch (expanded to
+50 per the user's own instruction to vary breakfast/lunch/protein-source/region/goal/condition) is an
+explicitly-labeled filler tier, used only to cover combinations the real set doesn't reach. Neither tier
+is ever presented to the LLM as anything other than "a real example day" in the rendered prompt text —
+the real/synthetic distinction is an internal ranking and audit concern, never exposed to the model.
+
+### Data model — one row = one complete day, never chunked
+
+`diet_plan_examples` — purely additive, alongside (not touching) `dietitian_knowledge_docs`/`chunks`.
+`goal` is a required scalar (`fat_loss | muscle_gain | maintenance`, exactly `InferredGoal`'s values) —
+unlike the knowledge layer's `goals[]`, an example is never goal-universal. `diet_types text[]` is a
+**positive list**, mirroring `recipes.dietTypes`'s existing convention exactly (`r.dietTypes.includes
+(ctx.dietType)`) — a veg-only day gets `["vegetarian","eggetarian"]`, a day containing chicken/fish gets
+`["non_vegetarian"]` only, authored by hand same as recipes, never inferred automatically. `region`
+reuses `RecipeCuisine`'s 9 values (`"General"` = pan-Indian), singular — a real example was built for
+one region. `gender` defaults `"any"` (most real sources don't specify one; `"any"` is a real, meaningful
+value here, not an absence). `calorie_min`/`calorie_max` are a range, not a point estimate, since real
+sources vary (exact numbers, stated ranges, or surplus-only framing with no absolute figure — the latter
+gets a plausible range estimated from the actual transcribed meal composition, never left null).
+`meal_structure jsonb` is an array of `{slot, timeHint, items}` — structured, not pre-formatted text, so
+the row stays queryable/auditable and `recipe-prompt.ts`'s formatter owns rendering, the same separation
+`RecipeForPrompt`/`RetrievedKnowledgeChunk` already use; `items` are free-text strings ("Methi paratha
+(2, no-fat)"), never grounded recipe references — this layer never touches `recipe-grounding.ts`.
+`condition text[]` is a genuinely new field, not in the original spec — added because the user's pasted
+batch introduced real medical-condition tagging (PCOS, diabetes, thyroid) that's a legitimate dimension.
+**v1 no-op at retrieval**: no client-condition signal exists anywhere upstream today (same class of gap
+`goal-inference.ts` closed for "goal") — ingested and stored now, ready for a v2 retrieval dimension.
+`source_type` (`real | synthetic`) is the two-tier model; `source_url`/`source_credibility` are required
+for `real` rows (enforced at ingestion, `seed-diet-plan-examples.ts` hard-refuses a `real` row missing
+either — not a DB constraint, since cross-column conditional nullability needs a trigger for no real
+benefit here). `diet_plan_example_embeddings` mirrors `recipeEmbeddings`/`dietitianKnowledgeEmbeddings`'s
+exact v2-deferred placeholder shape, explicitly **lower priority than even the knowledge layer's own
+placeholder** — v1's entire similarity surface (goal/dietType/region/calories/mealCount) is literal
+structured columns; nothing here benefits from embeddings without also changing what's matched.
+`plan_generation_runs.diet_plan_examples_injected` is a sibling audit column to `knowledge_chunks_
+injected` (not merged into it), same `{injected, droppedForBudget}` shape, keeping the two RAG layers'
+audit trails independently queryable.
+
+**Multi-day sources become per-day rows.** Several real sources are 7-day tables (Maharashtrian, CK
+Birla, Apollo247, Netmeds) — each day becomes its own row, sharing goal/region/gender/calorie-range but
+each with its own `meal_structure`/`reasoning`/`day_label`, and critically its own `diet_types` — the
+Maharashtrian source's one day with chicken biryani is tagged `["non_vegetarian"]` while its six sibling
+days stay `["vegetarian","eggetarian"]`; collapsing to one row per source would misclassify or lose that
+day's real content. 17 sources became 43 real rows once expanded.
+
+### Ingestion — `npm run seed:diet-plan-examples`
+
+Source: `src/db/seed-data/diet-plan-examples/{real,synthetic}/**/*.md`, one file per final DB row — the
+top-level `real`/`synthetic` split mirrors the `source_type` column, making the tier visually unmissable
+to anyone browsing the repo. New parser, `diet-plan-example-markdown-parser.ts`, genuinely different in
+kind from the knowledge layer's `parseChunks()`: a diet-plan-example markdown file's body has exactly
+two named H2 sections, `## Meal Structure` (one line per slot: `- {slot} ({timeHint}): {item}; {item}`)
+and `## Reasoning` (free prose, omittable) — parsed into fields of ONE record, not an array of N
+independent chunks. Chunking a day the way knowledge docs are chunked would destroy the "complete day"
+signal this whole layer exists to preserve. The small generic helpers (`parseScalar`/`parseArray`/
+`splitFrontmatter`/the frontmatter line-scan) are duplicated locally rather than imported from
+`knowledge-markdown-parser.ts` — matches this codebase's explicit, repeated choice not to share tiny
+helpers (`stableHash`, independently duplicated in 5 files), and the sibling parser doesn't export them
+anyway. `seed-diet-plan-examples.ts` mirrors `seed-knowledge.ts`'s upsert/diagnostics shape but is
+simpler: no child-table delete-reinsert step, since each markdown file is one `diet_plan_examples` row
+1:1. Hard refuses on a frontmatter-`id` collision (same class of guard as every other seed script in
+this codebase) or a `sourceType: real` file missing `sourceUrl`/`sourceCredibility`. Diagnostics banner
+prints the real/synthetic split explicitly, so it's never silently unclear how much of a seeded set is
+real — verified on the actual seed run: 93 files (43 real, 50 synthetic), zero warnings, zero collisions.
+
+All content ships `status: draft` — real-tier content is public-web-sourced, paraphrased and
+restructured into the schema (not verbatim marketing copy), retained with true `sourceUrl`/
+`sourceCredibility` for audit, never presented as validated ground truth until a real dietitian review
+pass. Synthetic-tier content is explicitly fabricated filler (`sourceUrl`/`sourceCredibility` null,
+`weight: 4` — deliberately below the real tier's 6-9 range), used only where real coverage doesn't
+reach.
+
+### Retrieval — hard filters + weighted similarity + a real/synthetic tier split
+
+`diet-plan-example-retrieval.ts`'s `retrieveDietPlanExamples()` is genuinely different in kind from
+`retrieveKnowledgeChunks()`'s hard-filter-only approach — this needs real similarity ranking, not just
+eligibility. **Hard filters** (never a candidate if failed): `goal` exact match; `dietType ∈
+example.dietTypes[]` (the same inclusion check `recipes.dietTypes` already uses, same reason — never
+surface a diet-incompatible example). **Soft-scored, weighted composite** (never hard-excludes):
+```
+score = regionScore*0.40 + calorieScore*0.35 + mealCountScore*0.15 + genderScore*0.10
+finalScore = score * (weight / 10)
+```
+`regionScore`: 1.0 exact match, 0.5 if either side is `"General"`, 0.15 otherwise (cross-region structure
+is still somewhat informative). `calorieScore`: 1.0 inside `[calorieMin, calorieMax]`, else `max(0, 1 -
+distanceOutsideRange/500)` — 500 kcal chosen as roughly one meal's worth in this dataset. `mealCountScore`:
+1.0/0.6/0.3/0 at 0/1/2/3+ slots off. `genderScore`: 1.0 for `"any"` or a real match; 0.6 for "unknown
+client gender vs. a specific example" (no client-gender signal exists upstream today — an accepted v1
+gap, stated explicitly rather than silently assumed); 0.4 for a genuine mismatch.
+
+**Real-first, synthetic-as-filler**: candidates partition into `real`/`synthetic` by `source_type`, each
+ranked independently by `finalScore` → a locally-duplicated `stableHash` tie-break (same convention as
+`knowledge-retrieval.ts`'s own), then `maxExamples` slots fill from the real-ranked list first — only
+once that pool is exhausted before reaching `maxExamples` does the synthetic-ranked list fill the
+remainder. A synthetic example can never outrank an eligible real one.
+
+**`DEFAULT_MAX_EXAMPLES = 1`, `DEFAULT_EXAMPLE_TOKEN_BUDGET = 500`** — deliberately not 2-3 examples or a
+larger budget. This is the single most consequential risk in the whole layer, stated prominently, not
+buried: this session's own two live NVIDIA test runs — with only the knowledge layer's smaller ~700-token
+addition already present in the prompt — both still ended in full-retry rejection (persistent low-fat
+bias, the variety-cap instruction ignored, on the current 8B-tier model). A full example day is
+inherently a *larger* block of text than one knowledge-layer bullet. Stacking a second, larger section on
+a knowledge layer that already measurably didn't prevent rejection is a real risk of making convergence
+worse, not a hypothetical one — ships at N=1/tight budget behind its own flag, and the first real
+validation step once content is confirmed should be a live A/B comparison run (knowledge-only vs.
+knowledge+examples), not just green unit tests.
+
+### Prompt integration
+
+`formatExamplesSection()` in `recipe-prompt.ts`, called directly after `formatKnowledgeSection()` in
+both `buildInitialMessages()`/`buildDayRetryMessages()` — same insertion point (between the recipe table
+and the final instruction). This delivers "knowledge-first-then-examples" exactly as directed: knowledge
+principles render textually before examples in the composed prompt. Each rendered example: a `[{region},
+{goal}, ~{avg kcal} kcal]` header, one line per real meal slot, then `Why: {reasoning}` if present.
+Framing text explicitly states examples carry more weight than the knowledge guidance above them, and —
+the same non-negotiable boundary the knowledge layer already states, re-anchored here since this section
+is materially richer text — neither ever overrides the recipe table or the numeric daily targets. One
+new terse `SYSTEM_PROMPT` bullet states the same precedence. Absent/empty `dietPlanExamples` renders
+`""`, byte-identical to before this layer existed — a dedicated regression test asserts this directly,
+plus a test asserting the examples block renders textually after the knowledge block when both are
+present.
+
+`recipe-selector.ts`'s control flow needed zero changes — one more optional field
+(`dietPlanExamples?: RetrievedDietPlanExample[]`) on `RecipeSelectorInput`, same mechanism the knowledge
+layer's own `knowledgeChunks` field already established.
+
+### Verified end-to-end without spending a live LLM call
+
+Loaded a real client's roadmap, ran real retrieval against the seeded 93-example table, rendered the
+real `buildInitialMessages()` output directly. For Priya (Punjabi, vegetarian, fat_loss, 1774 kcal
+target): retrieval correctly picked the closer-calorie Pan-Indian 1800kcal Dietburrp example (finalScore
+≈0.65) over the exact-region-match Punjabi 1218kcal example (finalScore ≈0.53) — the Punjabi example's
+narrow 1200-1218 kcal range scored 0 on calorie-closeness against a 1774 kcal target, while the Pan-Indian
+example's broader 1800 kcal range scored ≈0.95; a legitimate, explainable outcome of the weighting, not a
+bug — real dietitian judgment would likely also favor a closer-calorie broader-cuisine example over an
+exact-region one built for a client on a very different calorie budget. Confirmed the rendered prompt
+shows the full real meal structure and stated reasoning verbatim, in the correct position after the
+knowledge-guidance section, with the correct precedence framing.
+
+### Rollout
+
+`DIET_PLAN_EXAMPLES_ENABLED` defaults off everywhere, independent of `DIETITIAN_KNOWLEDGE_ENABLED` so
+each layer's real impact can be isolated in testing — both still require `RECIPE_ENGINE_ENABLED` to mean
+anything. Flip locally only once the initial content has had a real dietitian review pass AND a live
+A/B convergence comparison (see the token-budget risk above) shows this layer doesn't make an already
+convergence-fragile 8B model worse.
 
 ## Rounding & precision
 - All intermediate maths unrounded. Round only at display.

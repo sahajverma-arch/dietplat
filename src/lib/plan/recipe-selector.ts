@@ -16,9 +16,10 @@ import { buildDayRetryMessages, buildInitialMessages, type PromptMessage } from 
 import { llmRecipeDaySchema, llmRecipeSelectionSchema } from "./recipe-schema"
 import { buildRecipeIndex, groundSelection, type RecipeIndex } from "./recipe-grounding"
 import { balanceDayToTargets } from "./recipe-balancer"
-import { describeMacroProblems, isRecipeDayOffTarget, isRecipeWeekOffTarget } from "./recipe-validate"
+import { isRecipeDayOffTarget, isRecipeWeekOffTarget } from "./recipe-validate"
+import { blockingProblems, diagnoseDay } from "./recipe-day-diagnosis"
 import { describePlausibilityProblems, type ClientRecipeConstraints } from "./recipe-plausibility-validate"
-import { findDaysNeedingVarietyRetry, findVarietyViolations, MAX_RECIPE_REPEATS_PER_WEEK } from "./recipe-variety-tracker"
+import { findDaysNeedingVarietyRetry, findVarietyViolations } from "./recipe-variety-tracker"
 import { recipeSelectorFallback } from "./recipe-selector-fallback"
 import type { GroundedRecipeDay, GroundedRecipeSelection, RecipeAchievedMacros, RecipeSelection, RecipeSelectionResult, RecipeSelectorInput } from "./recipe-types"
 
@@ -78,25 +79,6 @@ function computeWeeklyAverage(days: GroundedRecipeDay[]): RecipeAchievedMacros {
     fatG: days.reduce((s, d) => s + d.totals.fatG, 0) / n,
     fiberG: days.reduce((s, d) => s + d.totals.fiberG, 0) / n,
   }
-}
-
-function diagnoseDay(day: GroundedRecipeDay, input: RecipeSelectorInput, constraints: ClientRecipeConstraints, overusedRecipeNames: Set<string>): string[] {
-  const problems = [
-    ...describeMacroProblems(day.totals, input.dailyTarget),
-    ...describePlausibilityProblems(day, constraints),
-  ]
-  if (day.unknownRecipeNames.length > 0) {
-    problems.push(`Could not identify these recipe names, they were dropped: ${day.unknownRecipeNames.join(", ")}`)
-  }
-  if (day.cappedRecipeNames.length > 0) {
-    problems.push(`These recipes hit their realistic serving limit without closing the gap — consider adding another dish instead: ${day.cappedRecipeNames.join(", ")}`)
-  }
-  for (const name of overusedRecipeNames) {
-    if (day.meals.some((m) => m.items.some((i) => i.recipe.name === name))) {
-      problems.push(`"${name}" has already been used more than ${MAX_RECIPE_REPEATS_PER_WEEK} times this week — choose a different recipe for this day.`)
-    }
-  }
-  return problems
 }
 
 function dayNeedsRetry(day: GroundedRecipeDay, input: RecipeSelectorInput, constraints: ClientRecipeConstraints, daysNeedingVarietyRetry: Set<number>): boolean {
@@ -239,7 +221,7 @@ export async function selectRecipes(
   const daysNeedingVarietyRetry = findDaysNeedingVarietyRetry(days)
   const overused = new Set(findVarietyViolations(days).map((v) => v.name))
   const dayProblems = days
-    .map((day) => ({ dayIndex: day.dayIndex, problems: diagnoseDay(day, input, constraints, overused) }))
+    .map((day) => ({ dayIndex: day.dayIndex, problems: blockingProblems(day, input, constraints, overused) }))
     .filter((d) => d.problems.length > 0 || daysNeedingVarietyRetry.has(d.dayIndex))
 
   const weeklyAverage = computeWeeklyAverage(days)

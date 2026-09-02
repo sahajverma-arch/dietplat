@@ -22,12 +22,15 @@ import { eq } from "drizzle-orm"
 
 import { classifyRecipeDietTypes } from "@/lib/foods/recipe-diet-classifier"
 import { normalizeRecipeAllergenTags } from "@/lib/foods/recipe-allergen-normalize"
+import { normalizeRecipeConsistency } from "@/lib/foods/recipe-consistency-normalize"
 import { normalizeCuisine } from "@/lib/foods/recipe-cuisine-mapping"
+import { parsePairingList } from "@/lib/foods/recipe-pairing-normalize"
 import { normalizeRecipeSeason } from "@/lib/foods/recipe-season-mapping"
 import { computeServingLimits } from "@/lib/foods/recipe-quantity-normalize"
 import { deriveRecipeUnit } from "@/lib/foods/recipe-unit-label"
 import { resolveAliasCollisions } from "@/lib/foods/recipe-alias-generation"
 import { parseRecipeCsv, type RawRecipeRow } from "@/lib/foods/recipe-csv-parser"
+import { CurationOverrideTracker } from "@/lib/foods/recipe-curation-overrides"
 import { recipeCategoryBucket } from "@/lib/plan/recipe-category"
 
 import { db } from "./index"
@@ -55,14 +58,20 @@ function normalizePriority(raw: string): "primary" | "secondary" | null {
   return null
 }
 
-function buildRecipeValues(row: RawRecipeRow) {
+function buildRecipeValues(row: RawRecipeRow, overrides: CurationOverrideTracker) {
   const dietClassification = classifyRecipeDietTypes(row.dietPrefRaw)
   const allergenNormalization = normalizeRecipeAllergenTags(row.allergenRaw)
   const cuisine = normalizeCuisine(row.cuisineRaw)
   const seasonResult = normalizeRecipeSeason(row.seasonRaw)
+  // Dietitian corrections to two classification fields only — see
+  // recipe-curation-overrides.ts. Macros and serving ranges are never
+  // touched, and rawCsvRow below still preserves the untouched source row.
+  const category = overrides.applyCategory(row.name, row.category)
+  const season = overrides.applySeason(row.name, seasonResult.season)
   const servingLimits = computeServingLimits(row)
   const unit = deriveRecipeUnit(row)
   const commonality = Number.parseInt(row.commonalityRaw, 10)
+  const consistency = normalizeRecipeConsistency(row.consistencyRaw)
 
   const allergenTags = new Set(allergenNormalization.tags)
   if (dietClassification.containsEgg) allergenTags.add("egg")
@@ -75,13 +84,18 @@ function buildRecipeValues(row: RawRecipeRow) {
       name: row.name,
       dietTypes: dietClassification.dietTypes,
       cuisine,
-      category: row.category,
+      category,
       macroCategory: row.macroCategoryRaw.trim() || null,
       heavyLight: normalizeHeavyLight(row.heavyLightRaw),
+      consistency,
       mainOrMid: normalizeMainOrMid(row.mainOrMidRaw),
       commonality: Number.isFinite(commonality) ? commonality : 0,
       priority: normalizePriority(row.priorityRaw),
-      season: seasonResult.season,
+      mustHaveCategories: parsePairingList(row.mustHaveCategoryRaw),
+      goodToHaveCategories: parsePairingList(row.goodToHaveCategoryRaw),
+      mustHaveRecipeNames: parsePairingList(row.mustHaveRecipeRaw),
+      goodToHaveRecipeNames: parsePairingList(row.goodToHaveRecipeRaw),
+      season,
       allergenTags: [...allergenTags],
       minGrams: servingLimits.minGrams,
       maxGrams: servingLimits.maxGrams,
@@ -101,10 +115,12 @@ function buildRecipeValues(row: RawRecipeRow) {
       cuisineWasRelabeled: cuisine === "General" && row.cuisineRaw.trim() !== "General" && row.cuisineRaw.trim() !== "Gujrati",
       rawCuisine: row.cuisineRaw,
       seasonUnrecognized: seasonResult.unrecognized,
-      categoryBucket: recipeCategoryBucket(row.category),
+      categoryBucket: recipeCategoryBucket(category, row.name),
+      category,
       servingLimitsFlags: servingLimits.flags,
       servingLimitsSource: servingLimits.source,
       hasNaturalUnit: unit !== null,
+      consistencyUnrecognized: consistency === null,
     },
   }
 }
@@ -130,8 +146,11 @@ async function main() {
   const otherCategoryNames = new Map<string, string[]>()
   const fallbackServingLimitRecipes: string[] = []
   const noNaturalUnitCount = { n: 0 }
+  const unrecognizedConsistencyCount = { n: 0 }
+  const pairingCounts = { mustCategory: 0, goodCategory: 0, mustRecipe: 0, goodRecipe: 0 }
   const commonalityDistribution = new Map<number, number>()
   const priorityDistribution = new Map<string, number>()
+  const overrides = new CurationOverrideTracker()
 
   const existingByName = new Map<string, string>()
   for (const r of await db.select({ id: recipes.id, name: recipes.name }).from(recipes)) {
@@ -142,7 +161,7 @@ async function main() {
   let inserted = 0
   let updated = 0
   for (const row of parsed.rows) {
-    const { values, diagnostics } = buildRecipeValues(row)
+    const { values, diagnostics } = buildRecipeValues(row, overrides)
 
     diagnostics.unclassifiedDietTokens.forEach((t) => unclassifiedDietTokens.add(t))
     diagnostics.unclassifiedAllergenTokens.forEach((t) => unclassifiedAllergenTokens.add(t))
@@ -151,12 +170,17 @@ async function main() {
     }
     if (diagnostics.seasonUnrecognized) unrecognizedSeasonCount.n++
     if (diagnostics.categoryBucket === "other") {
-      const list = otherCategoryNames.get(row.category) ?? []
+      const list = otherCategoryNames.get(diagnostics.category) ?? []
       list.push(row.name)
-      otherCategoryNames.set(row.category, list)
+      otherCategoryNames.set(diagnostics.category, list)
     }
     if (diagnostics.servingLimitsSource === "fallback_category_default") fallbackServingLimitRecipes.push(row.name)
     if (!diagnostics.hasNaturalUnit) noNaturalUnitCount.n++
+    if (diagnostics.consistencyUnrecognized) unrecognizedConsistencyCount.n++
+    if (values.mustHaveCategories.length > 0) pairingCounts.mustCategory++
+    if (values.goodToHaveCategories.length > 0) pairingCounts.goodCategory++
+    if (values.mustHaveRecipeNames.length > 0) pairingCounts.mustRecipe++
+    if (values.goodToHaveRecipeNames.length > 0) pairingCounts.goodRecipe++
     commonalityDistribution.set(values.commonality, (commonalityDistribution.get(values.commonality) ?? 0) + 1)
     priorityDistribution.set(values.priority ?? "(none)", (priorityDistribution.get(values.priority ?? "(none)") ?? 0) + 1)
 
@@ -179,6 +203,15 @@ async function main() {
     console.log(`  ${count}\t"${raw}"`)
   }
   console.log(`Unrecognized Season values: ${unrecognizedSeasonCount.n}`)
+  const unmatchedOverrides = overrides.unmatched()
+  console.log(
+    `Curation overrides applied (recipe-curation-overrides.ts) — category: ${overrides.appliedCategoryCount}, season: ${overrides.appliedSeasonCount}`
+  )
+  if (unmatchedOverrides.category.length > 0 || unmatchedOverrides.season.length > 0) {
+    console.log(`  STALE override entries matching no recipe (renamed source row?) — fix or remove them:`)
+    unmatchedOverrides.category.forEach((n) => console.log(`    category: "${n}"`))
+    unmatchedOverrides.season.forEach((n) => console.log(`    season: "${n}"`))
+  }
   console.log(`Categories falling to "other" bucket (extend recipe-category.ts):`)
   for (const [cat, names] of otherCategoryNames) {
     console.log(`  "${cat}" (${names.length}) — e.g. ${names.slice(0, 3).join(", ")}`)
@@ -188,6 +221,10 @@ async function main() {
     fallbackServingLimitRecipes.forEach((n) => console.log(`  - ${n}`))
   }
   console.log(`Recipes with no natural unit (gram-only display): ${noNaturalUnitCount.n} / ${parsed.rows.length}`)
+  console.log(`Recipes with blank/unrecognized Consistency (stored as null): ${unrecognizedConsistencyCount.n} / ${parsed.rows.length}`)
+  console.log(
+    `Recipes with pairing data — must-have category: ${pairingCounts.mustCategory}, good-to-have category: ${pairingCounts.goodCategory}, must-have recipe: ${pairingCounts.mustRecipe}, good-to-have recipe: ${pairingCounts.goodRecipe} (of ${parsed.rows.length})`
+  )
   console.log(`Commonality distribution: ${[...commonalityDistribution.entries()].sort((a, b) => a[0] - b[0]).map(([k, v]) => `${k}=${v}`).join(", ")}`)
   console.log(`Priority distribution: ${[...priorityDistribution.entries()].map(([k, v]) => `${k}=${v}`).join(", ")}`)
 

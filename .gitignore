@@ -34,3 +34,10 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# supabase CLI local scratch
+supabase/.temp/
+
+# generated plan output from scripts/compose-plan.ts + render-plan-pdf.tsx (dev tools)
+/*.pdf
+/*.html

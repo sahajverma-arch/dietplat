@@ -11,6 +11,7 @@
 import type { RoadmapResult } from "@/lib/counselling/roadmap"
 
 import { categoryNarrative, joinNatural, numberWord, type GuidelineBullet, type PlanViewDay } from "./plan-guidelines"
+import { portionSizeReferenceText } from "./recipe-quantity-display"
 
 export interface BuildRecipeGuidelinesInput {
   plan: { cuisine: string; dietType: string }
@@ -52,6 +53,11 @@ export function buildRecipeGuidelines({ plan, days, roadmapOutput }: BuildRecipe
   guidelines.push({
     text: "Portion sizes shown are as-served/cooked weight, ready to plate — not raw ingredient weight (the recipe engine's own convention, the opposite of Table 4.1's raw-weight cereal/pulse figures).",
   })
+
+  // The scale behind every container-sized portion on this plan — without
+  // it, "small bowl" is unanchored. Whole fruits and countable items (roti,
+  // dosa, idli, cutlet) are counted by the piece instead and need no legend.
+  guidelines.push({ text: portionSizeReferenceText() })
 
   if (roadmapOutput.proteinRamp.length > 0) {
     const ramp = roadmapOutput.proteinRamp
