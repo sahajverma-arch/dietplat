@@ -5,8 +5,8 @@ const envSchema = z.object({
   NEXT_PUBLIC_SUPABASE_URL: z.string().url(),
   NEXT_PUBLIC_SUPABASE_ANON_KEY: z.string().min(1),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
-  NVIDIA_API_KEY: z.string().min(1),
-  NVIDIA_MODEL: z.string().min(1),
+  OPENAI_API_KEY: z.string().min(1),
+  OPENAI_MODEL: z.string().min(1),
   // Global kill switch for the Meal Archetype layer (archetype-selector.ts).
   // Defaults enabled — set to "false" to force archetypeSelectorEnabled to
   // false everywhere, independent of what's seeded in meal_archetypes, as a
@@ -52,8 +52,8 @@ const parsed = envSchema.safeParse({
   NEXT_PUBLIC_SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL,
   NEXT_PUBLIC_SUPABASE_ANON_KEY: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
   SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY,
-  NVIDIA_API_KEY: process.env.NVIDIA_API_KEY,
-  NVIDIA_MODEL: process.env.NVIDIA_MODEL,
+  OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+  OPENAI_MODEL: process.env.OPENAI_MODEL,
   ARCHETYPE_SELECTION_ENABLED: process.env.ARCHETYPE_SELECTION_ENABLED,
   RECIPE_ENGINE_ENABLED: process.env.RECIPE_ENGINE_ENABLED,
   DIETITIAN_KNOWLEDGE_ENABLED: process.env.DIETITIAN_KNOWLEDGE_ENABLED,

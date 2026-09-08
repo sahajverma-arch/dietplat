@@ -11,7 +11,7 @@
  * LLM-only exemption here — see CLAUDE.md "The recipe engine").
  */
 
-import { createNvidiaClient, NVIDIA_MODEL } from "./nvidia-client"
+import { createOpenAIClient, OPENAI_MODEL } from "./openai-client"
 import { buildDayRetryMessages, buildInitialMessages, type PromptMessage } from "./recipe-prompt"
 import { llmRecipeDaySchema, llmRecipeSelectionSchema } from "./recipe-schema"
 import { buildRecipeIndex, groundSelection, type RecipeIndex } from "./recipe-grounding"
@@ -46,7 +46,15 @@ export interface SelectRecipesOptions {
 export class RecipeSelectionRejectedError extends Error {
   constructor(
     message: string,
-    public readonly dayProblems: { dayIndex: number; problems: string[] }[]
+    public readonly dayProblems: { dayIndex: number; problems: string[] }[],
+    /**
+     * The week that was built and then rejected — carried purely so a
+     * caller can SHOW it. Without this a rejected run reports what was
+     * wrong but never what it actually composed, which is backwards for
+     * diagnosing why the model drifted. Nothing writes this to the DB: the
+     * reject-on-failure gate is unchanged, this is diagnostic payload only.
+     */
+    public readonly rejectedDays: GroundedRecipeDay[] = []
   ) {
     super(message)
     this.name = "RecipeSelectionRejectedError"
@@ -91,10 +99,10 @@ function dayNeedsRetry(day: GroundedRecipeDay, input: RecipeSelectorInput, const
 }
 
 async function callModel(messages: PromptMessage[]): Promise<{ rawResponse: string | null; latencyMs: number }> {
-  const client = createNvidiaClient()
+  const client = createOpenAIClient()
   const startedAt = Date.now()
   const completion = await client.chat.completions.create({
-    model: NVIDIA_MODEL,
+    model: OPENAI_MODEL,
     messages,
     response_format: { type: "json_object" },
     temperature: 0.3,
@@ -129,14 +137,14 @@ async function runWholeWeekPhase(
         const grounded = groundSelection(selection, index)
         const balancedDays = grounded.days.map((day) => balanceDayToTargets(day, input.dailyTarget))
         validationResult = { ok: true, errors: [] }
-        onAttempt?.({ attemptNumber, dayIndex: null, model: NVIDIA_MODEL, promptHash, rawResponse, validationResult, latencyMs })
-        return { grounded: { days: balancedDays }, generationMode: "ai", modelUsed: NVIDIA_MODEL, attempts: attemptNumber }
+        onAttempt?.({ attemptNumber, dayIndex: null, model: OPENAI_MODEL, promptHash, rawResponse, validationResult, latencyMs })
+        return { grounded: { days: balancedDays }, generationMode: "ai", modelUsed: OPENAI_MODEL, attempts: attemptNumber }
       }
     } catch (err) {
       validationResult = { ok: false, errors: [err instanceof Error ? err.message : String(err)] }
     }
 
-    onAttempt?.({ attemptNumber, dayIndex: null, model: NVIDIA_MODEL, promptHash, rawResponse, validationResult, latencyMs })
+    onAttempt?.({ attemptNumber, dayIndex: null, model: OPENAI_MODEL, promptHash, rawResponse, validationResult, latencyMs })
 
     if (attemptNumber < maxAttempts) {
       await sleep(BASE_BACKOFF_MS * 2 ** (attemptNumber - 1))
@@ -174,14 +182,14 @@ async function retryOneDay(
       const grounded = groundSelection({ days: [parsedDay] }, index)
       const balanced = balanceDayToTargets(grounded.days[0], input.dailyTarget)
       validationResult = { ok: true, errors: [] }
-      onAttempt?.({ attemptNumber, dayIndex: day.dayIndex, model: NVIDIA_MODEL, promptHash, rawResponse, validationResult, latencyMs })
+      onAttempt?.({ attemptNumber, dayIndex: day.dayIndex, model: OPENAI_MODEL, promptHash, rawResponse, validationResult, latencyMs })
       return { ...balanced, dayIndex: day.dayIndex }
     }
   } catch (err) {
     validationResult = { ok: false, errors: [err instanceof Error ? err.message : String(err)] }
   }
 
-  onAttempt?.({ attemptNumber, dayIndex: day.dayIndex, model: NVIDIA_MODEL, promptHash, rawResponse, validationResult, latencyMs })
+  onAttempt?.({ attemptNumber, dayIndex: day.dayIndex, model: OPENAI_MODEL, promptHash, rawResponse, validationResult, latencyMs })
   return null
 }
 
@@ -230,7 +238,8 @@ export async function selectRecipes(
   if (dayProblems.length > 0 || weekOffTarget) {
     throw new RecipeSelectionRejectedError(
       `Recipe plan rejected: ${dayProblems.length} day(s) still failed validation after ${maxDayRetries} retries.`,
-      dayProblems
+      dayProblems,
+      days
     )
   }
 

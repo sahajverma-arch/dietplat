@@ -6,7 +6,7 @@ Internal dietitian tool for Fitelo. Staff-only. Counselling intake → determini
 - Next.js 14 App Router + TypeScript (strict). Server Actions for mutations, Route Handlers for anything the AI touches.
 - Supabase: Postgres + Auth (Google OAuth) + RLS. Drizzle ORM. No Prisma.
 - Vercel deploy. Node runtime for AI routes (not edge — long timeouts needed).
-- NVIDIA NIM for LLM calls, OpenAI-compatible: `baseURL: https://integrate.api.nvidia.com/v1`, key `NVIDIA_API_KEY`, model from `NVIDIA_MODEL` env var.
+- OpenAI for LLM calls: default `baseURL`, key `OPENAI_API_KEY`, model from `OPENAI_MODEL` env var. Replaced NVIDIA NIM on 2026-09-08 when a real OpenAI key became available — every historical "live NVIDIA run" note further down this file describes that retired provider and is left as written.
 - Tailwind + shadcn/ui. No component library beyond that.
 
 ## THE ONE RULE THAT MATTERS
@@ -1227,7 +1227,7 @@ makes this bite constantly rather than rarely — of 1222 ingested recipes, 18% 
 (`min == max`, so they trip the check no matter what the balancer does) and only 15% have real
 headroom in both directions; in a single cuisine pool it is worse (48 of 416 for North Indian
 non-veg). The split now lives in `recipe-day-diagnosis.ts` (extracted from `recipe-selector.ts` only
-so it is unit-testable — that file imports `nvidia-client.ts`, which validates server env at module
+so it is unit-testable — that file imports `openai-client.ts`, which validates server env at module
 load): `blockingProblems()` is the write gate and mirrors `dayNeedsRetry()` exactly, `diagnoseDay()`
 is a strict superset that still reports caps to the model on a retry, and caps now reach the returned
 `warnings` as originally designed. This is NOT a softening of the reject-on-failure ethos in the "Do

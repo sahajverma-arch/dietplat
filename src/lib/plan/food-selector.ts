@@ -8,7 +8,7 @@
  * fallback so plan generation always succeeds.
  */
 
-import { createNvidiaClient, NVIDIA_MODEL } from "./nvidia-client"
+import { createOpenAIClient, OPENAI_MODEL } from "./openai-client"
 import { SYSTEM_PROMPT, buildUserPrompt } from "./food-selector-prompt"
 import { llmSelectionSchema } from "./food-selector-schema"
 import { toSelection, validateSelection } from "./food-selector-validate"
@@ -51,7 +51,7 @@ export async function selectFoods(
   const maxAttempts = options.maxAttempts ?? MAX_ATTEMPTS
   const userPrompt = buildUserPrompt(input)
   const promptHash = hashString(userPrompt)
-  const client = createNvidiaClient()
+  const client = createOpenAIClient()
 
   for (let attemptNumber = 1; attemptNumber <= maxAttempts; attemptNumber++) {
     const startedAt = Date.now()
@@ -60,7 +60,7 @@ export async function selectFoods(
 
     try {
       const completion = await client.chat.completions.create({
-        model: NVIDIA_MODEL,
+        model: OPENAI_MODEL,
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
           { role: "user", content: userPrompt },
@@ -83,13 +83,13 @@ export async function selectFoods(
         if (errors.length === 0) {
           options.onAttempt?.({
             attemptNumber,
-            model: NVIDIA_MODEL,
+            model: OPENAI_MODEL,
             promptHash,
             rawResponse,
             validationResult,
             latencyMs: Date.now() - startedAt,
           })
-          return { selection, generationMode: "ai", modelUsed: NVIDIA_MODEL, attempts: attemptNumber }
+          return { selection, generationMode: "ai", modelUsed: OPENAI_MODEL, attempts: attemptNumber }
         }
       }
     } catch (err) {
@@ -98,7 +98,7 @@ export async function selectFoods(
 
     options.onAttempt?.({
       attemptNumber,
-      model: NVIDIA_MODEL,
+      model: OPENAI_MODEL,
       promptHash,
       rawResponse,
       validationResult,

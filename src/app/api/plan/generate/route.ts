@@ -1,6 +1,6 @@
 /**
  * POST /api/plan/generate — turns a roadmap snapshot + week number into a
- * priced, food-filled diet plan. Node runtime (not edge): the NVIDIA call
+ * priced, food-filled diet plan. Node runtime (not edge): the OpenAI call
  * plus up to 3 retries with backoff can run long. See CLAUDE.md "THE ONE
  * RULE THAT MATTERS" — every number here comes from roadmap.ts /
  * exchange-solver.ts / quantity.ts; the LLM (inside selectFoods) only ever
