@@ -17,6 +17,7 @@ import type { Answers } from "../../src/lib/counselling/questions"
 import { weekTargets, type RoadmapResult } from "../../src/lib/counselling/roadmap"
 import { clientRecipeAllergenTagsFromAnswers, dietTypeFromAnswers } from "../../src/lib/plan/client-profile-from-answers"
 import { eligibleCuisinesFor, templateRegionForCuisine, type RecipeCuisine } from "../../src/lib/foods/recipe-cuisine-mapping"
+import { filterRecipePool } from "../../src/lib/foods/recipe-pool-filters"
 import { buildRecipeIndex, type RecipeIndex } from "../../src/lib/plan/recipe-grounding"
 import type { ClientRecipeConstraints } from "../../src/lib/plan/recipe-plausibility-validate"
 import type { DailyRecipeTarget, MealSlotInfo, RecipeForPrompt, RecipeSelectorInput } from "../../src/lib/plan/recipe-types"
@@ -77,12 +78,15 @@ export async function buildRecipeRunContext(
     .from(recipes)
     .where(and(eq(recipes.isActive, true), inArray(recipes.cuisine, eligibleCuisines)))
   const clientAllergenTags = clientRecipeAllergenTagsFromAnswers(session.answers as Answers)
-  const filtered = cuisineRows.filter(
+  const eligible = cuisineRows.filter(
     (r) =>
       r.dietTypes.includes(dietType) &&
       (r.season === "all_year" || r.season === season) &&
       !r.allergenTags.some((t) => clientAllergenTags.includes(t))
   )
+  // Same pool filters the production route applies, so a script run stays
+  // comparable to a real generation.
+  const filtered = filterRecipePool(eligible, dailyTarget)
 
   const eligibleRecipesForPrompt: RecipeForPrompt[] = filtered.map((r) => ({
     id: r.id,

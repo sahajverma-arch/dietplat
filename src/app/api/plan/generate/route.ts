@@ -61,6 +61,7 @@ import { selectFoods, type AttemptLog } from "@/lib/plan/food-selector"
 import { checkArchetypeAdherence } from "@/lib/plan/food-selector-validate"
 import type { FoodSelectorInput, PreviousWeekItem } from "@/lib/plan/food-selector-types"
 import { selectRecipes, RecipeSelectionRejectedError, type RecipeAttemptLog } from "@/lib/plan/recipe-selector"
+import { filterRecipePool } from "@/lib/foods/recipe-pool-filters"
 import type { ClientRecipeConstraints } from "@/lib/plan/recipe-plausibility-validate"
 import type { DailyRecipeTarget, MealSlotInfo, RecipeForPrompt, RecipeSelectorInput } from "@/lib/plan/recipe-types"
 import { seasonFor } from "@/lib/plan/season"
@@ -309,12 +310,17 @@ async function generateRecipeEnginePlan(ctx: RecipeEngineContext): Promise<NextR
     .from(recipes)
     .where(and(eq(recipes.isActive, true), inArray(recipes.cuisine, eligibleCuisines)))
 
-  const filtered = cuisineRows.filter(
+  const eligible = cuisineRows.filter(
     (r) =>
       r.dietTypes.includes(ctx.dietType) &&
       (r.season === "all_year" || r.season === ctx.season) &&
       !r.allergenTags.some((t) => ctx.clientRecipeAllergenTags.includes(t))
   )
+  // Drop rows that declare no energy at all, and dishes far fattier than
+  // this client's own macro split, before the model ever sees the pool.
+  // See recipe-pool-filters.ts for the real rejected week that motivated
+  // both. The fat filter declines to narrow rather than starve the pool.
+  const filtered = filterRecipePool(eligible, ctx.dailyTarget)
 
   if (filtered.length === 0) {
     return NextResponse.json(
