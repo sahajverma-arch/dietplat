@@ -1236,7 +1236,7 @@ could never be retried into compliance simply stopped being a gate.
 
 ### Best-of-N generation (2026-09-08) — the default path
 
-`RECIPE_BEST_OF_N` (env, **default 5**) makes `selectRecipes()` run N *independent* whole-week calls
+`RECIPE_BEST_OF_N` (env, **default 3**) makes `selectRecipes()` run N *independent* whole-week calls
 with **no day retries**, and keep the week closest to target on its **weekly average**. Setting it to
 `0` restores the original per-day-retry path, untouched, as an escape hatch.
 
@@ -1276,9 +1276,21 @@ into the score: mixing them in would quietly reintroduce the per-day gate this s
 replace. Ties resolve to the earliest candidate, so a fixed input order gives a deterministic winner
 rather than depending on sort stability.
 
-**Operational note.** Best-of-5 also fixes a real Vercel constraint the retry path had: 19-22 calls
-ran ~65-90s against `route.ts`'s `maxDuration = 120` (which itself requires a Vercel Pro plan);
-5 independent calls run ~40s with real headroom. `attemptWholeWeek()` is shared by both paths so they
+**Ranking is two-level, and the second level was a real bug fixed before first deploy.** A candidate
+that *clears* the gate always beats one that does not, whatever their scores; ties within each group
+break on the lower score. Ranking on the score alone — the first implementation — was wrong because
+`isRecipeWeekOffTarget` checks **each macro individually** against the tolerance while the mean can
+hide a single macro far outside it. Observed on a real run: a candidate scored 3.84% mean and still
+failed, because one macro was over 8%. Picking purely by mean can therefore choose a *failing* week
+over a *passing* one and reject the whole plan when an acceptable week was right there. It did not
+bite on that run only because the lowest-mean candidate happened to also pass.
+
+**Operational note — why the default is 3, not 5.** Measured call latency is ~5-10s, so 5 attempts run
+~45-50s end to end. Vercel **Hobby caps functions at 60s**, which leaves no real margin (a single slow
+call, or a cold start, times the request out *after* the OpenAI calls are already billed). 3 attempts
+run ~30s. `route.ts`'s `maxDuration` is **60** to match that ceiling; raise both together if the
+deployment moves to a plan with a longer one. This also fixes the constraint the retry path had:
+19-22 calls ran ~65-90s against a `maxDuration = 120` that itself required Vercel Pro. `attemptWholeWeek()` is shared by both paths so they
 cannot drift apart on how a week is built, and the deterministic fallback selector is still used, but
 only if *every* one of the N calls failed.
 

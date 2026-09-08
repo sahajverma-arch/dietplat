@@ -78,7 +78,10 @@ import { RateLimitExceededError, checkAndRecordPlanGenerationRequest } from "@/l
 import { isSameOrigin } from "@/lib/require-same-origin"
 
 export const runtime = "nodejs"
-export const maxDuration = 120
+// 60, not 120: Vercel Hobby caps functions at 60s. Best-of-3 runs ~30s end
+// to end (see env.ts RECIPE_BEST_OF_N), leaving a real margin. Raise both
+// together if the deployment moves to a plan with a longer ceiling.
+export const maxDuration = 60
 
 const exchangeRequestSchema = z.object({
   engine: z.literal("exchange"),

@@ -46,11 +46,13 @@ const envSchema = z.object({
     .optional()
     .transform((v) => v === "true"),
   // How many independent whole-week attempts the recipe engine makes before
-  // keeping the one closest to target on its weekly average (see
-  // CLAUDE.md "Best-of-N generation"). Default 5 — the retry path it
-  // replaces cost 19-22 calls per generation and still rejected. 0 restores
-  // that original per-day-retry path, as an escape hatch.
-  RECIPE_BEST_OF_N: z.coerce.number().int().min(0).max(10).default(5),
+  // keeping the best (see CLAUDE.md "Best-of-N generation"). Default 3, set
+  // by a real deployment constraint rather than by quality alone: measured
+  // call latency is ~5-10s, so 5 attempts run ~45-50s end to end, which does
+  // not fit Vercel Hobby's 60s function ceiling with any safety margin.
+  // 3 runs ~30s. The retry path this replaces cost 19-22 calls and still
+  // rejected. 0 restores that original per-day-retry path, as an escape hatch.
+  RECIPE_BEST_OF_N: z.coerce.number().int().min(0).max(10).default(3),
 })
 
 const parsed = envSchema.safeParse({

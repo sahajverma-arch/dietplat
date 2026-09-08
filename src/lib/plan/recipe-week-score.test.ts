@@ -80,6 +80,40 @@ describe("pickBestWeek", () => {
     expect(pickBestWeek([b, a], TARGET)?.index).toBe(0)
   })
 
+  it("prefers a candidate that CLEARS the gate over a lower-scoring one that fails", () => {
+    // Failing week: mean looks decent, but fat alone is 20% out — over the
+    // 8% per-macro tolerance the gate actually checks. This is the real
+    // observed shape (a 3.84% mean that still failed).
+    const lowerMeanButFails = flatWeek({ fatG: 72 }) // mean 0.05, but fat 20% out -> FAILS
+    // Passing week: every macro 7% out — inside the 8% gate — but a WORSE
+    // mean (0.07) than the failing candidate above.
+    const higherMeanButPasses = flatWeek({ kcal: 2140, proteinG: 107, carbsG: 267.5, fatG: 64.2 })
+
+    expect(weeklyDeviationScore(lowerMeanButFails, TARGET)).toBeLessThan(
+      weeklyDeviationScore(higherMeanButPasses, TARGET)
+    )
+
+    const best = pickBestWeek([lowerMeanButFails, higherMeanButPasses], TARGET)
+    expect(best?.passes).toBe(true)
+    expect(best?.days).toBe(higherMeanButPasses)
+  })
+
+  it("still ranks by score when candidates agree on passing", () => {
+    const worse = flatWeek({ proteinG: 106 })
+    const better = flatWeek({ proteinG: 101 })
+    const best = pickBestWeek([worse, better], TARGET)
+    expect(best?.passes).toBe(true)
+    expect(best?.days).toBe(better)
+  })
+
+  it("still returns the least-bad week when every candidate fails", () => {
+    const bad = flatWeek({ fatG: 90 })
+    const worse = flatWeek({ fatG: 110 })
+    const best = pickBestWeek([worse, bad], TARGET)
+    expect(best?.passes).toBe(false)
+    expect(best?.days).toBe(bad)
+  })
+
   it("reports the winning score alongside the week", () => {
     const best = pickBestWeek([flatWeek({ proteinG: 110 })], TARGET)
     expect(best?.score).toBeCloseTo(0.025, 6)
