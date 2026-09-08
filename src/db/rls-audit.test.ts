@@ -29,6 +29,15 @@ loadEnvLocalIfMissing()
 const url = process.env.NEXT_PUBLIC_SUPABASE_URL
 const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
 
+/**
+ * These are live cross-region HTTPS round trips (a Vercel build runs in
+ * iad1 while this project's Supabase is in ap-northeast-1), not hermetic
+ * unit tests, so vitest's 5s default is far too tight: a real Vercel build
+ * failed with exactly two of the twenty tables timing out while the other
+ * eighteen passed. The assertions are unchanged — only the patience is.
+ */
+const NETWORK_TEST_TIMEOUT_MS = 30_000
+
 // Every table in src/db/schema.ts that carries staff/client data or
 // reference data — CLAUDE.md: "Staff-only. " Nothing here should ever be
 // readable by an unauthenticated key, including the food/exchange
@@ -60,17 +69,21 @@ describe.skipIf(!url || !anonKey)("RLS audit — anon key reads zero rows on eve
   const anon = createClient(url ?? "", anonKey ?? "")
 
   for (const table of TABLES) {
-    it(`${table}`, async () => {
-      const { data, error } = await anon.from(table).select("*").limit(1)
-      // RLS denial can surface as either an empty result set or an explicit
-      // permission error, depending on the policy shape — both mean "zero
-      // rows readable", which is the only thing this test asserts.
-      if (error) {
-        expect(error).toBeTruthy()
-      } else {
-        expect(data).toEqual([])
-      }
-    })
+    it(
+      `${table}`,
+      async () => {
+        const { data, error } = await anon.from(table).select("*").limit(1)
+        // RLS denial can surface as either an empty result set or an explicit
+        // permission error, depending on the policy shape — both mean "zero
+        // rows readable", which is the only thing this test asserts.
+        if (error) {
+          expect(error).toBeTruthy()
+        } else {
+          expect(data).toEqual([])
+        }
+      },
+      NETWORK_TEST_TIMEOUT_MS
+    )
   }
 })
 
@@ -126,5 +139,5 @@ describe.skipIf(!databaseUrl)("RLS audit — every policy's SQL actually checks 
     } finally {
       await sql.end()
     }
-  })
+  }, NETWORK_TEST_TIMEOUT_MS)
 })
