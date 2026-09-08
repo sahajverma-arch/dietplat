@@ -374,7 +374,10 @@ async function generateRecipeEnginePlan(ctx: RecipeEngineContext): Promise<NextR
   let selectionResult: Awaited<ReturnType<typeof selectRecipes>> | undefined
   let rejectedError: RecipeSelectionRejectedError | undefined
   try {
-    selectionResult = await selectRecipes(recipeSelectorInput, constraints, { onAttempt: (log) => attempts.push(log) })
+    selectionResult = await selectRecipes(recipeSelectorInput, constraints, {
+      onAttempt: (log) => attempts.push(log),
+      bestOfN: env.RECIPE_BEST_OF_N,
+    })
   } catch (err) {
     if (err instanceof RecipeSelectionRejectedError) {
       rejectedError = err

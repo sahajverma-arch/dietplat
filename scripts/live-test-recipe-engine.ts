@@ -162,7 +162,13 @@ async function main() {
     // is enough to SEE what the model composes even though skipping the
     // retries makes rejection more likely, not less.
     const single = process.argv.includes("--single")
+    // --best-of N exercises the real production best-of-N path inside
+    // selectRecipes(), not the standalone best-of-n-week.ts script — so a
+    // green run here is evidence about what actually ships.
+    const bestOfIdx = process.argv.indexOf("--best-of")
+    const bestOfN = bestOfIdx === -1 ? undefined : Number(process.argv[bestOfIdx + 1])
     const result = await selectRecipes(input, constraints, {
+      ...(bestOfN ? { bestOfN } : {}),
       ...(single ? { maxWeekAttempts: 1, maxDayRetries: 0 } : {}),
       onAttempt: (log) => console.log(`  attempt#${log.attemptNumber} day=${log.dayIndex ?? "week"} ok=${log.validationResult.ok} errors=${JSON.stringify(log.validationResult.errors).slice(0, 200)} latency=${log.latencyMs}ms`),
     })

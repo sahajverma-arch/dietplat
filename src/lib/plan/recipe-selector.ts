@@ -16,10 +16,11 @@ import { buildDayRetryMessages, buildInitialMessages, type PromptMessage } from 
 import { llmRecipeDaySchema, llmRecipeSelectionSchema } from "./recipe-schema"
 import { buildRecipeIndex, groundSelection, type RecipeIndex } from "./recipe-grounding"
 import { balanceDayToTargets } from "./recipe-balancer"
-import { isRecipeDayOffTarget, isRecipeWeekOffTarget } from "./recipe-validate"
+import { describeMacroProblems, isRecipeDayOffTarget, isRecipeWeekOffTarget } from "./recipe-validate"
+import { computeWeeklyAverage, pickBestWeek, weeklyDeviationScore } from "./recipe-week-score"
 import { blockingProblems, diagnoseDay } from "./recipe-day-diagnosis"
 import { describePlausibilityProblems, type ClientRecipeConstraints } from "./recipe-plausibility-validate"
-import { findDaysNeedingVarietyRetry, findVarietyViolations } from "./recipe-variety-tracker"
+import { findDaysNeedingVarietyRetry, findVarietyViolations, MAX_RECIPE_REPEATS_PER_WEEK } from "./recipe-variety-tracker"
 import { recipeSelectorFallback } from "./recipe-selector-fallback"
 import type { GroundedRecipeDay, GroundedRecipeSelection, RecipeAchievedMacros, RecipeSelection, RecipeSelectionResult, RecipeSelectorInput } from "./recipe-types"
 
@@ -41,6 +42,16 @@ export interface SelectRecipesOptions {
   onAttempt?: (log: RecipeAttemptLog) => void
   maxWeekAttempts?: number
   maxDayRetries?: number
+  /**
+   * Best-of-N strategy: run N independent whole-week calls (no day retries)
+   * and keep the one closest to target on its WEEKLY AVERAGE. 0/undefined
+   * keeps the original per-day-retry path untouched.
+   *
+   * Exists because the retry path costs 19-22 calls and, measured on real
+   * runs, 18 day-retries repaired exactly one day before the week was
+   * rejected anyway. N independent attempts buy more variation per rupee.
+   */
+  bestOfN?: number
 }
 
 export class RecipeSelectionRejectedError extends Error {
@@ -78,17 +89,6 @@ function extractJson(raw: string): unknown {
   return JSON.parse(raw.slice(start, end + 1))
 }
 
-function computeWeeklyAverage(days: GroundedRecipeDay[]): RecipeAchievedMacros {
-  const n = days.length || 1
-  return {
-    kcal: days.reduce((s, d) => s + d.totals.kcal, 0) / n,
-    proteinG: days.reduce((s, d) => s + d.totals.proteinG, 0) / n,
-    carbsG: days.reduce((s, d) => s + d.totals.carbsG, 0) / n,
-    fatG: days.reduce((s, d) => s + d.totals.fatG, 0) / n,
-    fiberG: days.reduce((s, d) => s + d.totals.fiberG, 0) / n,
-  }
-}
-
 function dayNeedsRetry(day: GroundedRecipeDay, input: RecipeSelectorInput, constraints: ClientRecipeConstraints, daysNeedingVarietyRetry: Set<number>): boolean {
   return (
     isRecipeDayOffTarget(day.totals, input.dailyTarget) ||
@@ -108,6 +108,113 @@ async function callModel(messages: PromptMessage[]): Promise<{ rawResponse: stri
     temperature: 0.3,
   })
   return { rawResponse: completion.choices[0]?.message?.content ?? null, latencyMs: Date.now() - startedAt }
+}
+
+/**
+ * One whole-week call: model -> parse -> ground -> balance. Returns null on
+ * any failure (empty response, unparseable JSON, schema mismatch), having
+ * already emitted its attempt log either way. Shared by both the retry path
+ * and the best-of-N path so they cannot drift apart on how a week is built.
+ */
+async function attemptWholeWeek(
+  input: RecipeSelectorInput,
+  index: RecipeIndex,
+  messages: PromptMessage[],
+  promptHash: string,
+  attemptNumber: number,
+  onAttempt?: (log: RecipeAttemptLog) => void
+): Promise<GroundedRecipeDay[] | null> {
+  let rawResponse: string | null = null
+  let latencyMs = 0
+  let validationResult: { ok: boolean; errors: string[] } = { ok: false, errors: [] }
+
+  try {
+    const result = await callModel(messages)
+    rawResponse = result.rawResponse
+    latencyMs = result.latencyMs
+
+    if (!rawResponse) {
+      validationResult = { ok: false, errors: ["Model returned an empty response."] }
+    } else {
+      const parsed = llmRecipeSelectionSchema.parse(extractJson(rawResponse))
+      const grounded = groundSelection(parsed, index)
+      const balanced = grounded.days.map((day) => balanceDayToTargets(day, input.dailyTarget))
+      validationResult = { ok: true, errors: [] }
+      onAttempt?.({ attemptNumber, dayIndex: null, model: OPENAI_MODEL, promptHash, rawResponse, validationResult, latencyMs })
+      return balanced
+    }
+  } catch (err) {
+    validationResult = { ok: false, errors: [err instanceof Error ? err.message : String(err)] }
+  }
+
+  onAttempt?.({ attemptNumber, dayIndex: null, model: OPENAI_MODEL, promptHash, rawResponse, validationResult, latencyMs })
+  return null
+}
+
+/**
+ * Best-of-N: N independent whole-week calls, keep the one closest to target
+ * on its weekly average. No backoff between attempts — these are independent
+ * samples, not retries of a failure, and the whole point is a small fixed
+ * cost. Falls back to the deterministic selector only if EVERY call failed.
+ */
+async function runBestOfNPhase(
+  input: RecipeSelectorInput,
+  index: RecipeIndex,
+  n: number,
+  onAttempt?: (log: RecipeAttemptLog) => void
+): Promise<{ days: GroundedRecipeDay[]; generationMode: "ai" | "fallback"; modelUsed: string | null; attempts: number }> {
+  const messages = buildInitialMessages(input)
+  const promptHash = hashString(JSON.stringify(messages))
+
+  const candidates: GroundedRecipeDay[][] = []
+  for (let attemptNumber = 1; attemptNumber <= n; attemptNumber++) {
+    const days = await attemptWholeWeek(input, index, messages, promptHash, attemptNumber, onAttempt)
+    if (days) candidates.push(days)
+  }
+
+  const best = pickBestWeek(candidates, input.dailyTarget)
+  if (best === null) {
+    const fallbackSelected = recipeSelectorFallback(input)
+    const grounded = groundSelection(fallbackSelected, index)
+    return {
+      days: grounded.days.map((day) => balanceDayToTargets(day, input.dailyTarget)),
+      generationMode: "fallback",
+      modelUsed: null,
+      attempts: n,
+    }
+  }
+  return { days: best.days, generationMode: "ai", modelUsed: OPENAI_MODEL, attempts: candidates.length }
+}
+
+/**
+ * Everything a dietitian should see about a best-of-N week that the
+ * weekly-average gate does NOT reject it for. Nothing is hidden: per-day
+ * macro misses, plausibility problems, variety breaches and serving-limit
+ * hits all surface here, they simply do not block the write.
+ */
+function bestOfNWarnings(
+  days: GroundedRecipeDay[],
+  input: RecipeSelectorInput,
+  constraints: ClientRecipeConstraints
+): string[] {
+  const warnings: string[] = []
+  const overused = new Set(findVarietyViolations(days).map((v) => v.name))
+
+  for (const day of days) {
+    for (const problem of describeMacroProblems(day.totals, input.dailyTarget)) {
+      warnings.push(`Day ${day.dayIndex}: ${problem}`)
+    }
+    for (const problem of describePlausibilityProblems(day, constraints)) {
+      warnings.push(`Day ${day.dayIndex}: ${problem}`)
+    }
+    if (day.cappedRecipeNames.length > 0) {
+      warnings.push(`Day ${day.dayIndex}: recipes hit their serving limit: ${day.cappedRecipeNames.join(", ")}`)
+    }
+  }
+  if (overused.size > 0) {
+    warnings.push(`Used more than ${MAX_RECIPE_REPEATS_PER_WEEK} times this week: ${[...overused].join(", ")}`)
+  }
+  return warnings
 }
 
 async function runWholeWeekPhase(
@@ -201,6 +308,42 @@ export async function selectRecipes(
   const maxWeekAttempts = options.maxWeekAttempts ?? MAX_WEEK_ATTEMPTS
   const maxDayRetries = options.maxDayRetries ?? MAX_DAY_RETRIES
   const index = buildRecipeIndex([...input.allRecipesById.values()], input.aliasRows)
+
+  // BEST-OF-N PATH. A deliberate, confirmed change of acceptance rule for
+  // this path only: the week is gated on its WEEKLY AVERAGE, which is
+  // exactly the standard the exchange engine already holds itself to
+  // (assertWeeklyAverageWithinTolerance), instead of every day clearing the
+  // per-day tolerance. This is NOT a softening to "always succeeds with
+  // warnings" — a week whose average misses is still rejected outright with
+  // no DB write, which is what CLAUDE.md's "Do not" list actually protects.
+  // Per-day misses become warnings rather than vanishing; see
+  // bestOfNWarnings().
+  if (options.bestOfN && options.bestOfN > 0) {
+    const { days, generationMode, modelUsed, attempts } = await runBestOfNPhase(input, index, options.bestOfN, options.onAttempt)
+    const weeklyAverage = computeWeeklyAverage(days)
+
+    if (isRecipeWeekOffTarget(weeklyAverage, input.dailyTarget)) {
+      const overused = new Set(findVarietyViolations(days).map((v) => v.name))
+      const dayProblems = days
+        .map((day) => ({ dayIndex: day.dayIndex, problems: blockingProblems(day, input, constraints, overused) }))
+        .filter((d) => d.problems.length > 0)
+      const pct = (weeklyDeviationScore(days, input.dailyTarget) * 100).toFixed(1)
+      // Name the fallback explicitly: "best of 5" would be actively
+      // misleading when all 5 calls failed (e.g. an invalid API key) and
+      // this is really the deterministic selector's week.
+      const source =
+        generationMode === "fallback"
+          ? `every one of ${attempts} model call(s) failed, so the deterministic fallback week was used, and it`
+          : `best of ${attempts} attempt(s)`
+      throw new RecipeSelectionRejectedError(
+        `Recipe plan rejected: ${source} missed the weekly-average target by ${pct}% on average.`,
+        dayProblems,
+        days
+      )
+    }
+
+    return { selection: { days }, generationMode, modelUsed, attempts, warnings: bestOfNWarnings(days, input, constraints) }
+  }
 
   const { grounded, generationMode, modelUsed, attempts } = await runWholeWeekPhase(input, index, maxWeekAttempts, options.onAttempt)
   let days = grounded.days

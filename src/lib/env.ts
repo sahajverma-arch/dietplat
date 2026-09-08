@@ -45,6 +45,12 @@ const envSchema = z.object({
     .string()
     .optional()
     .transform((v) => v === "true"),
+  // How many independent whole-week attempts the recipe engine makes before
+  // keeping the one closest to target on its weekly average (see
+  // CLAUDE.md "Best-of-N generation"). Default 5 — the retry path it
+  // replaces cost 19-22 calls per generation and still rejected. 0 restores
+  // that original per-day-retry path, as an escape hatch.
+  RECIPE_BEST_OF_N: z.coerce.number().int().min(0).max(10).default(5),
 })
 
 const parsed = envSchema.safeParse({
@@ -58,6 +64,7 @@ const parsed = envSchema.safeParse({
   RECIPE_ENGINE_ENABLED: process.env.RECIPE_ENGINE_ENABLED,
   DIETITIAN_KNOWLEDGE_ENABLED: process.env.DIETITIAN_KNOWLEDGE_ENABLED,
   DIET_PLAN_EXAMPLES_ENABLED: process.env.DIET_PLAN_EXAMPLES_ENABLED,
+  RECIPE_BEST_OF_N: process.env.RECIPE_BEST_OF_N,
 })
 
 if (!parsed.success) {

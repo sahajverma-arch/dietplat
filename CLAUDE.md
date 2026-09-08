@@ -1234,6 +1234,54 @@ is a strict superset that still reports caps to the model on a retry, and caps n
 not" list below — macro tolerance, plausibility and variety reject exactly as before; a check that
 could never be retried into compliance simply stopped being a gate.
 
+### Best-of-N generation (2026-09-08) — the default path
+
+`RECIPE_BEST_OF_N` (env, **default 5**) makes `selectRecipes()` run N *independent* whole-week calls
+with **no day retries**, and keep the week closest to target on its **weekly average**. Setting it to
+`0` restores the original per-day-retry path, untouched, as an escape hatch.
+
+**Why this replaced the retry loop.** Measured on real OpenAI runs against Aadi (TEST-004, North
+Indian) — not reasoned from first principles: the retry path spent **19 calls (~$1)**, of which 18
+were day-retries, and repaired **exactly one day** before the week was rejected anyway. The day-retry
+loop kept steering toward the same low-density snack recipes it was already stuck on; three retries
+per day was nowhere near enough to escape that basin. Five *independent* samples produce genuinely
+different weeks instead of five variations of one bad one. Best-of-5 costs **5 calls (~$0.15)** and,
+on the first real run, produced an accepted week at **2.89%** weekly-average deviation (protein
++0.2%, kcal −0.2%), with 2 of the 5 candidates clearing the gate outright.
+
+**The acceptance rule genuinely changed for this path, and that was an explicit decision, not drift.**
+Best-of-N gates on the **weekly average** (`isRecipeWeekOffTarget`) rather than requiring all 7 days
+to clear the per-day ±8% tolerance. This is not a new standard invented for convenience — it is
+exactly what the exchange engine has always held itself to (`assertWeeklyAverageWithinTolerance`, see
+"Day-to-day macro variety, weekly average pinned to target"), so the recipe engine was until now held
+to a *stricter* rule than the platform's own established clinical one. The measured reality that
+forced the question: per-day, a single-call week lands 0–2 of 7 days inside tolerance, while its
+weekly average lands within tolerance on every macro.
+
+**This is NOT the "always succeeds with warnings" softening the "Do not" list forbids.** A week whose
+*average* misses is still **rejected outright, with no DB write** — that guarantee is intact. What
+changed is which quantity is measured, not whether failure is tolerated. Per-day macro misses,
+plausibility problems, variety breaches and serving-limit hits do not vanish either: `bestOfNWarnings()`
+surfaces every one of them in `RecipeSelectionResult.warnings`, so a dietitian sees exactly how much
+each day wobbles. Nothing is hidden; it simply no longer blocks.
+
+**Ranking** lives in `recipe-week-score.ts` (extracted so it is unit-testable — `recipe-selector.ts`
+imports `openai-client.ts`, which validates server env at module load; same reason
+`recipe-day-diagnosis.ts` was extracted). `weeklyDeviationScore()` is the mean absolute deviation of
+the weekly average across kcal/protein/carbs/fat, as a fraction directly comparable to
+`RECIPE_MACRO_TOLERANCE`; fiber is excluded for the same soft-target reason `recipe-validate.ts`
+excludes it. Days that cancel out — one low, one high — score well *by design*, since the weekly
+average is what the gate measures. Plausibility and variety counts are deliberately **not** folded
+into the score: mixing them in would quietly reintroduce the per-day gate this strategy exists to
+replace. Ties resolve to the earliest candidate, so a fixed input order gives a deterministic winner
+rather than depending on sort stability.
+
+**Operational note.** Best-of-5 also fixes a real Vercel constraint the retry path had: 19-22 calls
+ran ~65-90s against `route.ts`'s `maxDuration = 120` (which itself requires a Vercel Pro plan);
+5 independent calls run ~40s with real headroom. `attemptWholeWeek()` is shared by both paths so they
+cannot drift apart on how a week is built, and the deterministic fallback selector is still used, but
+only if *every* one of the N calls failed.
+
 ### Fiber — soft target, still logged
 
 `weekTargets()` produces a real `fibreG` daily target, and the recipe engine is the first engine to
