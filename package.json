@@ -9,6 +9,7 @@
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.mts",
     "verify": "npm run typecheck && npm run lint && npm run test",
     "seed:foods": "tsx --env-file=.env.local src/db/seed-foods.ts",
     "seed:recipes": "tsx --env-file=.env.local src/db/seed-recipes.ts",
