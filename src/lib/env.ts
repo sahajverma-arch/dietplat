@@ -1,5 +1,7 @@
 import { z } from "zod"
 
+import { optionalBoundedInt } from "./env-schema-helpers"
+
 const envSchema = z.object({
   DATABASE_URL: z.string().url(),
   NEXT_PUBLIC_SUPABASE_URL: z.string().url(),
@@ -52,7 +54,10 @@ const envSchema = z.object({
   // not fit Vercel Hobby's 60s function ceiling with any safety margin.
   // 3 runs ~30s. The retry path this replaces cost 19-22 calls and still
   // rejected. 0 restores that original per-day-retry path, as an escape hatch.
-  RECIPE_BEST_OF_N: z.coerce.number().int().min(0).max(10).default(3),
+  // optionalBoundedInt, not z.coerce.number().default(): a BLANK value in a
+  // hosting dashboard must mean "not set" (3), never 0 — 0 is the escape
+  // hatch back to the old 19-22 call path. See env-schema-helpers.ts.
+  RECIPE_BEST_OF_N: optionalBoundedInt(3, 0, 10),
 })
 
 const parsed = envSchema.safeParse({
